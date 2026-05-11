@@ -32,6 +32,8 @@ internal sealed class SettingsWindow : Window
     private double hoveredBundledBackgroundStartedAt;
     private int bundledBackgroundCarouselIndex;
     private float bundledBackgroundCarouselOffset;
+    private readonly List<string> bundledBackgroundImageCache = new();
+    private bool bundledBackgroundImageCacheLoaded;
     private int activeCarouselDirection;
     private double nextCarouselRepeatAt;
     private Vector2 bundledBackgroundLeftArrowMin;
@@ -594,6 +596,7 @@ var drawList = ImGui.GetWindowDrawList();
 
             File.Delete(path);
             profileImages.Invalidate(path);
+            InvalidateBundledBackgroundImageCache();
 
             if (wasSelected)
                 selectedBundledBackgroundPath = string.Empty;
@@ -742,6 +745,10 @@ var drawList = ImGui.GetWindowDrawList();
 
     private List<string> GetBundledBackgroundImages()
     {
+        if (bundledBackgroundImageCacheLoaded)
+            return bundledBackgroundImageCache;
+
+        bundledBackgroundImageCache.Clear();
         var extensions = GetSupportedBackgroundExtensions();
         var images = new List<string>();
 
@@ -756,11 +763,19 @@ var drawList = ImGui.GetWindowDrawList();
 
         images.AddRange(ExtractEmbeddedBackgroundImages(extensions));
 
-        return images
+        bundledBackgroundImageCache.AddRange(images
             .Where(File.Exists)
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)
-            .ToList();
+            .OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase));
+
+        bundledBackgroundImageCacheLoaded = true;
+        return bundledBackgroundImageCache;
+    }
+
+    private void InvalidateBundledBackgroundImageCache()
+    {
+        bundledBackgroundImageCacheLoaded = false;
+        bundledBackgroundImageCache.Clear();
     }
 
     private static HashSet<string> GetSupportedBackgroundExtensions()
@@ -807,12 +822,16 @@ var drawList = ImGui.GetWindowDrawList();
             var fileName = GetEmbeddedImageFileName(resourceName, extension);
             var targetPath = Path.Combine(outputDirectory, fileName);
 
-            using var input = assembly.GetManifestResourceStream(resourceName);
-            if (input == null)
-                continue;
+            if (!File.Exists(targetPath) || new FileInfo(targetPath).Length == 0)
+            {
+                using var input = assembly.GetManifestResourceStream(resourceName);
+                if (input == null)
+                    continue;
 
-            using var output = File.Create(targetPath);
-            input.CopyTo(output);
+                using var output = File.Create(targetPath);
+                input.CopyTo(output);
+            }
+
             extracted.Add(targetPath);
         }
 
@@ -976,6 +995,7 @@ var drawList = ImGui.GetWindowDrawList();
             var fileName = $"custom_background_{DateTimeOffset.Now:yyyyMMdd_HHmmssfff}{extension}";
             var targetPath = Path.Combine(directory, fileName);
             File.Copy(sourcePath, targetPath, overwrite: false);
+            InvalidateBundledBackgroundImageCache();
 
             selectedBundledBackgroundPath = targetPath;
             customBackgroundUploadedThisSession = false;
