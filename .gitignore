@@ -1,0 +1,16 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.cache
+*.tmp
+*.log
+*.env
+.env
+*.sln
+appsettings*.json
+secrets.json
+*_secret*
+*_secrets*
+_release_upload/

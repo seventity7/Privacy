@@ -1,0 +1,14 @@
+{
+  "Author": "Bryer",
+  "Name": "Privacy",
+  "Punchline": "A private contacts & places list.",
+  "Description": "Adds a private list for contacts and places. Right-click Add to private list, profile images, notes, tells, party invites and more.",
+  "InternalName": "Privacy",
+  "ApplicableVersion": "any",
+  "IconUrl": "https://raw.githubusercontent.com/seventity7/Privacy/main/icon.png",
+  "Tags": [
+    "contacts",
+    "private list",
+    "social"
+  ]
+}

@@ -1,0 +1,5000 @@
+using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
+using Dalamud.Interface.ImGuiFileDialog;
+using Dalamud.Interface.Utility;
+using Dalamud.Interface.Utility.Raii;
+using Dalamud.Interface.Windowing;
+using Dalamud.Plugin.Services;
+using Privacy.Models;
+using Privacy.Services;
+using Privacy.UI;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Numerics;
+
+namespace Privacy.Windows;
+
+internal sealed class PrivacyWindow : Window, IDisposable
+{
+    private const float CompactUiWidth = 529f;
+    private const float CompactUiHeight = 715f;
+    private const float InitialFooterHeightEstimate = 0f;
+    private const float CompactSidebarRailRounding = 4f;
+    private const float CompactSidebarRailBorderThickness = 8f;
+    private const float CompactSidebarRailBackgroundAlpha = 0.14f;
+    private const float CompactSidebarRailBorderAlpha = 0.18f;
+    private const float CompactSidebarRailHighlightAlpha = 0.10f;
+    private const int CompactSidebarDotColumns = 5;
+    private const float CompactSidebarDotRadius = 0.8f;
+    private const float CompactSidebarDotInset = 6f;
+    private const float CompactSidebarDotAlpha = 0.16f;
+    private const float CompactSidebarToggleHeight = 16f;
+    private const float CompactSidebarToggleBottomPadding = 6f;
+    private const float CompactSidebarToggleHorizontalInset = 4f;
+    private const float CompactSidebarToggleRounding = 6f;
+    private const float TopSummaryHeight = 32f;
+    private const float HeaderHeight = 42f;
+    private const float CompactWarningBannerSpacing = 0f;
+    private const float BottomNavigationHeight = 40f;
+    private const float RowHeight = 92f;
+    private const float PortraitSize = 50f;
+
+    private readonly Configuration config;
+    private readonly PrivacyService listService;
+    private readonly NativeCommandExecutor nativeCommands;
+    private readonly ProfileImageCache profileImages;
+    private readonly GameIconCache gameIcons;
+    private readonly FriendListService friendListService;
+    private readonly IPluginLog log;
+    private readonly NotesWindow notesWindow;
+    private readonly SettingsWindow settingsWindow;
+    private readonly EstateTeleportWindow estateTeleportWindow;
+    private readonly ContactProfileWindow contactProfileWindow;
+    private readonly LoginWindow loginWindow;
+    private readonly MyProfileWindow myProfileWindow;
+    private readonly OnlineProfileWindow onlineProfileWindow;
+    private readonly DotBackdropRenderer sidebarDotRenderer = new();
+    private readonly FileDialogManager fileDialog = new();
+    private readonly List<ManualDragRow> manualDragRows = new();
+
+    private PrivateContact? pendingImageContact;
+    private PrivateContact? quickNoteContact;
+    private string quickNoteBuffer = string.Empty;
+    private bool openQuickNoteNextFrame;
+    private bool quickNoteWindowOpen;
+    private Vector2 quickNoteWindowPos;
+    private bool unregisteredProfileWindowOpen;
+    private Vector2 unregisteredProfileWindowPos;
+    private PrivateContact? tagContact;
+    private string tagBuffer = string.Empty;
+    private string tagColorHexBuffer = "#FFD56A";
+    private Vector4 tagPickerColor = UiColors.HexToRgba("#FFD56A");
+    private string editingExistingTag = string.Empty;
+    private bool tagEditorWindowOpen;
+    private string? editingNotesContactId;
+    private string inlineNotesBuffer = string.Empty;
+    private string? focusInlineNotesContactId;
+    private string newGroupNameBuffer = string.Empty;
+    private string groupColorHexBuffer = "#2BE5B5";
+    private Vector4 groupPickerColor = UiColors.HexToRgba("#2BE5B5");
+    private string newVenueNameBuffer = string.Empty;
+    private string venueColorHexBuffer = "#2BE5B5";
+    private Vector4 venuePickerColor = UiColors.HexToRgba("#2BE5B5");
+    private PrivateContact? editingVenueLocation;
+    private string venueLocationBuffer = string.Empty;
+    private PrivateContact? editingVenueTeleport;
+    private string venueTeleportCommandBuffer = string.Empty;
+    private PrivateContact? editingVenueColor;
+    private string venueEditColorHexBuffer = "#2BE5B5";
+    private Vector4 venueEditPickerColor = UiColors.HexToRgba("#2BE5B5");
+    private bool openVenueLocationPopup;
+    private bool openVenueTeleportPopup;
+    private bool openVenueColorPopup;
+    private string lastImageError = string.Empty;
+    private float windowContentWidth;
+    private Vector2 windowClipMin;
+    private Vector2 windowClipMax;
+    private Vector2 topSummaryPanelPos;
+    private Vector2 topSummaryPanelSize;
+    private bool topSummaryPanelCloseHovered;
+    private bool topSummaryPanelCollapseHovered;
+    private bool draggingWindowFromSummary;
+    private string? draggingRowKind;
+    private string? draggingRowId;
+    private string? draggingRowGroupId;
+    private bool draggingRowActive;
+    private Vector2 draggingRowMouseStart;
+    private Vector2 draggingRowMouseOffset;
+    private Vector2 draggingRowSize;
+    private string draggingRowTitle = string.Empty;
+    private string draggingRowSubtitle = string.Empty;
+    private Vector4 draggingRowAccent = Vector4.One;
+    private bool hasTopSummaryPanelGeometry;
+    private bool openMissingLifestreamPopup;
+    private int pushedColorCount;
+    private int pushedStyleVarCount;
+
+    private sealed class ManualDragRow
+    {
+        public string Kind { get; init; } = string.Empty;
+        public string Id { get; init; } = string.Empty;
+        public string GroupId { get; init; } = string.Empty;
+        public Vector2 Min { get; init; }
+        public Vector2 Max { get; init; }
+        public Vector4 Accent { get; init; }
+    }
+
+    public PrivacyWindow(
+        Configuration config,
+        PrivacyService listService,
+        NativeCommandExecutor nativeCommands,
+        ProfileImageCache profileImages,
+        GameIconCache gameIcons,
+        FriendListService friendListService,
+        IPluginLog log,
+        NotesWindow notesWindow,
+        SettingsWindow settingsWindow,
+        EstateTeleportWindow estateTeleportWindow,
+        ContactProfileWindow contactProfileWindow,
+        LoginWindow loginWindow,
+        MyProfileWindow myProfileWindow,
+        OnlineProfileWindow onlineProfileWindow)
+        : base("Privacy###PrivacyMain")
+    {
+        this.config = config;
+        this.listService = listService;
+        this.nativeCommands = nativeCommands;
+        this.profileImages = profileImages;
+        this.gameIcons = gameIcons;
+        this.friendListService = friendListService;
+        this.log = log;
+        this.notesWindow = notesWindow;
+        this.settingsWindow = settingsWindow;
+        this.estateTeleportWindow = estateTeleportWindow;
+        this.contactProfileWindow = contactProfileWindow;
+        this.loginWindow = loginWindow;
+        this.myProfileWindow = myProfileWindow;
+        this.onlineProfileWindow = onlineProfileWindow;
+
+        Size = new Vector2(CompactUiWidth, CompactUiHeight);
+        SizeCondition = ImGuiCond.Always;
+
+        WindowBuilder.For(this)
+            .AllowPinning(true)
+            .AllowClickthrough(false)
+            .SetSizeConstraints(new Vector2(CompactUiWidth, TopSummaryHeight + 8f), new Vector2(CompactUiWidth, CompactUiHeight))
+            .AddFlags(ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoMove)
+            .Apply();
+    }
+
+    public void Dispose()
+    {
+    }
+
+    public override void PreDraw()
+    {
+        Size = config.WindowCollapsed
+            ? new Vector2(CompactUiWidth, (config.HideTopBar ? HeaderHeight : TopSummaryHeight) + 8f)
+            : new Vector2(CompactUiWidth, CompactUiHeight);
+        SizeCondition = ImGuiCond.Always;
+
+        pushedColorCount = 0;
+        pushedStyleVarCount = 0;
+
+        PushColor(ImGuiCol.Text, new Vector4(1f, 1f, 1f, 1f));
+        PushColor(ImGuiCol.TextDisabled, new Vector4(0.5f, 0.5f, 0.5f, 1f));
+        PushColor(ImGuiCol.WindowBg, Vector4.Zero);
+        PushColor(ImGuiCol.ChildBg, UiColors.Get("PrivateChildBg"));
+        PushColor(ImGuiCol.PopupBg, UiColors.Get("PrivatePopupBg"));
+        PushColor(ImGuiCol.Border, UiColors.Get("PrivateBorder"));
+        PushColor(ImGuiCol.BorderShadow, new Vector4(0f, 0f, 0f, 0.58f));
+        PushColor(ImGuiCol.FrameBg, UiColors.Get("PrivateFrameBg"));
+        PushColor(ImGuiCol.FrameBgHovered, UiColors.Get("PrivateFrameBgHovered"));
+        PushColor(ImGuiCol.FrameBgActive, UiColors.Get("PrivateFrameBgActive"));
+        PushColor(ImGuiCol.TitleBg, UiColors.Get("PrivateTitleBg"));
+        PushColor(ImGuiCol.TitleBgActive, UiColors.Get("PrivateTitleBgActive"));
+        PushColor(ImGuiCol.TitleBgCollapsed, UiColors.Get("PrivateTitleBgCollapsed"));
+        PushColor(ImGuiCol.ScrollbarBg, Alpha(config.WindowBackgroundColor, 0.16f));
+        PushColor(ImGuiCol.ScrollbarGrab, Alpha(config.AccentColor, 0.55f));
+        PushColor(ImGuiCol.ScrollbarGrabHovered, Alpha(config.AccentColor, 0.72f));
+        PushColor(ImGuiCol.ScrollbarGrabActive, Alpha(config.AccentColor, 0.92f));
+        PushColor(ImGuiCol.Button, UiColors.Get("ButtonDefault"));
+        PushColor(ImGuiCol.ButtonHovered, config.AccentColor);
+        PushColor(ImGuiCol.ButtonActive, UiColors.Get("LightlessPurpleActive"));
+        PushColor(ImGuiCol.Header, new Vector4(0f, 0f, 0f, 0.24f));
+        PushColor(ImGuiCol.HeaderHovered, new Vector4(0f, 0f, 0f, 0.35f));
+        PushColor(ImGuiCol.HeaderActive, new Vector4(0f, 0f, 0f, 0.47f));
+        PushColor(ImGuiCol.Separator, new Vector4(0.29f, 0.29f, 0.29f, 0.47f));
+        PushColor(ImGuiCol.ResizeGrip, new Vector4(0f, 0f, 0f, 0f));
+        PushColor(ImGuiCol.ResizeGripHovered, new Vector4(0f, 0f, 0f, 0f));
+        PushColor(ImGuiCol.ResizeGripActive, UiColors.Get("LightlessPurpleActive"));
+
+        PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(5f, 5f) * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(4f, 3f) * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(4f, 4f) * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.ItemInnerSpacing, new Vector2(4f, 4f) * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.ScrollbarSize, 10f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1.5f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.ChildBorderSize, 1.5f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.WindowRounding, 7f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.ChildRounding, 4f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameRounding, 4f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.ScrollbarRounding, 4f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.GrabRounding, 4f * ImGuiHelpers.GlobalScale);
+    }
+
+    public override void PostDraw()
+    {
+        if (pushedStyleVarCount > 0)
+            ImGui.PopStyleVar(pushedStyleVarCount);
+        if (pushedColorCount > 0)
+            ImGui.PopStyleColor(pushedColorCount);
+    }
+
+    public override void Draw()
+    {
+        friendListService.Refresh();
+        listService.RefreshRuntimeState(friendListService.Friends);
+
+        var drawList = ImGui.GetWindowDrawList();
+        var windowPos = ImGui.GetWindowPos();
+        var windowSize = ImGui.GetWindowSize();
+        windowClipMin = windowPos - new Vector2(18f, 18f) * ImGuiHelpers.GlobalScale;
+        windowClipMax = windowPos + windowSize + new Vector2(18f, 18f) * ImGuiHelpers.GlobalScale;
+        DrawWindowChrome(drawList, windowPos, windowSize);
+
+        windowContentWidth = GetWindowContentRegionWidth();
+        var style = ImGui.GetStyle();
+        var scale = ImGuiHelpers.GlobalScale;
+        var gradientInset = 4f * scale;
+        var bottomNavHeight = BottomNavigationHeight * scale;
+        var mainColumnWidth = GetWindowContentRegionWidth();
+
+        hasTopSummaryPanelGeometry = false;
+        if (!config.HideTopBar)
+        {
+            using (ImRaii.PushId("top-summary"))
+                DrawTopSummaryPanel();
+        }
+
+        if (config.WindowCollapsed)
+        {
+            if (config.HideTopBar)
+            {
+                using (ImRaii.PushId("collapsed-header"))
+                    DrawUIDHeader();
+            }
+            else
+            {
+                RedrawTopSummaryPanelOverlay();
+            }
+
+            DrawDeferredPopups();
+            fileDialog.Draw();
+            return;
+        }
+
+        var availableHeight = MathF.Max(1f, ImGui.GetContentRegionAvail().Y);
+        var bodyHeight = MathF.Max(1f, availableHeight - bottomNavHeight - style.ItemSpacing.Y);
+        DrawCompactMainColumn(drawList, mainColumnWidth, bodyHeight, gradientInset);
+        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + style.ItemSpacing.Y);
+        DrawBottomNavigationBar(mainColumnWidth, bottomNavHeight);
+        if (!config.HideTopBar)
+            RedrawTopSummaryPanelOverlay();
+
+        DrawDeferredPopups();
+        fileDialog.Draw();
+    }
+
+    private void PushColor(ImGuiCol target, Vector4 color)
+    {
+        ImGui.PushStyleColor(target, color);
+        pushedColorCount++;
+    }
+
+    private void PushStyleVar(ImGuiStyleVar target, float value)
+    {
+        ImGui.PushStyleVar(target, value);
+        pushedStyleVarCount++;
+    }
+
+    private void PushStyleVar(ImGuiStyleVar target, Vector2 value)
+    {
+        ImGui.PushStyleVar(target, value);
+        pushedStyleVarCount++;
+    }
+
+    private static Vector4 Alpha(Vector4 color, float alpha)
+        => UiColors.WithAlpha(color, alpha);
+
+    private static Vector4 Lighten(Vector4 color, float amount)
+        => new(MathF.Min(1f, color.X + amount), MathF.Min(1f, color.Y + amount), MathF.Min(1f, color.Z + amount), color.W);
+
+    private static uint Color(Vector4 color)
+        => ImGui.GetColorU32(color);
+
+    private static float GetWindowContentRegionWidth()
+        => ImGui.GetWindowContentRegionMax().X - ImGui.GetWindowContentRegionMin().X;
+
+
+    private string GetActiveSearchText()
+        => config.ActiveView switch
+        {
+            1 => config.FavoritesSearchText,
+            2 => config.VenuesSearchText,
+            3 => config.DiscoverSearchText,
+            4 => config.GroupsSearchText,
+            _ => config.ContactsSearchText,
+        };
+
+    private void SetActiveSearchText(string value)
+    {
+        switch (config.ActiveView)
+        {
+            case 1:
+                config.FavoritesSearchText = value;
+                break;
+            case 2:
+                config.VenuesSearchText = value;
+                break;
+            case 3:
+                config.DiscoverSearchText = value;
+                break;
+            case 4:
+                config.GroupsSearchText = value;
+                break;
+            default:
+                config.ContactsSearchText = value;
+                break;
+        }
+
+        config.SearchText = value;
+    }
+
+    private string GetActiveViewDisplayName()
+        => config.ActiveView switch
+        {
+            1 => "Favorites",
+            2 => "Venues",
+            3 => "Discover",
+            4 => "Groups",
+            _ => string.Empty,
+        };
+
+    private static float GetSidebarWidth()
+    {
+        var buttonSize = GetSidebarButtonSize();
+        return buttonSize.X + 6f * ImGuiHelpers.GlobalScale;
+    }
+
+    private static float GetCollapsedSidebarWidth()
+        => 26f * ImGuiHelpers.GlobalScale;
+
+    private static Vector2 GetSidebarButtonSize()
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var side = MathF.Max(ImGui.GetFrameHeight(), 30f * scale) + 10f * scale;
+        return new Vector2(side, side);
+    }
+
+    private void DrawWindowChrome(ImDrawListPtr drawList, Vector2 pos, Vector2 size)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var bodyTopOffset = config.HideTopBar ? 1f * scale : (TopSummaryHeight + 1f) * scale;
+        var min = pos + new Vector2(1f * scale, bodyTopOffset);
+        var max = pos + size - new Vector2(1f, 1f) * scale;
+
+        if (max.Y <= min.Y)
+            return;
+
+        if (!DrawCustomMainBackground(drawList, min, max, scale))
+        {
+            drawList.AddRectFilled(min, max, Color(config.WindowBackgroundColor), 7f * scale);
+            DrawThemeBackdrop(drawList, min, max);
+        }
+
+        drawList.AddRect(min, max, Color(Alpha(config.AccentColor, 0.10f)), 7f * scale, ImDrawFlags.None, 1f * scale);
+    }
+
+    private bool IsCustomMainBackgroundActive()
+        => config.UseCustomMainBackgroundImage &&
+            !string.IsNullOrWhiteSpace(config.CustomMainBackgroundImagePath) &&
+            File.Exists(config.CustomMainBackgroundImagePath);
+
+    private bool DrawCustomMainBackground(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale)
+    {
+        if (!IsCustomMainBackgroundActive())
+            return false;
+
+        var texture = profileImages.GetTexture(config.CustomMainBackgroundImagePath);
+        if (texture == null)
+            return false;
+
+        var imageSize = new Vector2(577f, 697f);
+        var imageMin = min;
+        var imageMax = imageMin + imageSize;
+
+        drawList.PushClipRect(min, max, true);
+        drawList.AddRectFilled(min, max, Color(config.WindowBackgroundColor), 7f * scale);
+        drawList.AddImageRounded(texture.Handle, imageMin, imageMax, Vector2.Zero, Vector2.One, ImGui.GetColorU32(Vector4.One), 7f * scale);
+
+        // Overlay always uses the same exact 577x697 rect as the image.
+        drawList.AddRectFilled(imageMin, imageMax, ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.42f)), 7f * scale);
+
+        DrawCustomBackgroundEffect(drawList, imageMin, imageMax, scale, imageSize.X, imageSize.Y);
+        drawList.PopClipRect();
+        return true;
+    }
+
+    private void DrawCustomBackgroundEffect(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
+    {
+        var effect = config.CustomBackgroundEffectName;
+
+        if (string.IsNullOrWhiteSpace(effect))
+            return;
+
+        var color = GetCustomBackgroundEffectColor(effect);
+        var soft = Alpha(color, 0.30f);
+        var mid = Alpha(color, 0.44f);
+        var light = Alpha(Lighten(color, 0.16f), 0.52f);
+        var animationTime = (float)ImGui.GetTime();
+
+        switch (effect)
+        {
+            case "All Red":
+                for (var y = min.Y + 12f * scale; y < max.Y; y += 34f * scale)
+                {
+                    drawList.AddLine(new Vector2(min.X + 8f * scale, y), new Vector2(max.X - 8f * scale, y + 16f * scale), Color(Alpha(color, 0.34f)), 2.0f * scale);
+                    drawList.AddLine(new Vector2(min.X + 8f * scale, y + 8f * scale), new Vector2(max.X - 8f * scale, y + 24f * scale), Color(Alpha(Lighten(color, 0.16f), 0.18f)), 1.2f * scale);
+                }
+                break;
+
+            case "All Gold":
+                {
+                    var inset = 8f * scale;
+                    var spreadWidth = MathF.Max(1f, width - inset * 2f);
+                    var spreadHeight = MathF.Max(1f, height - inset * 2f);
+
+                    for (var i = 0; i < 130; i++)
+                    {
+                        var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 130, 901u, animationTime, 5.2f * scale, 0.048f, false);
+                        var r = (i % 4 == 0 ? 2.8f : 1.55f) * scale * GetAnimatedThemeSymbolPulse(i, 903u, animationTime, 0.036f, 0.16f);
+                        drawList.AddCircleFilled(p, r, Color(Alpha(i % 3 == 0 ? light : color, 0.22f + (i % 4) * 0.035f)), 12);
+                    }
+
+                    for (var y = min.Y + 28f * scale; y < max.Y; y += 76f * scale)
+                        drawList.AddLine(new Vector2(min.X + 12f * scale, y), new Vector2(max.X - 12f * scale, y + 20f * scale), Color(Alpha(color, 0.18f)), 1.6f * scale);
+                }
+                break;
+
+            case "White Gold":
+                {
+                    var inset = 12f * scale;
+                    var spreadWidth = MathF.Max(1f, width - inset * 2f);
+                    var spreadHeight = MathF.Max(1f, height - inset * 2f);
+
+                    for (var i = 0; i < 95; i++)
+                    {
+                        var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 95, 921u, animationTime, 5.6f * scale, 0.044f, false);
+                        var radius = (2.2f + (i % 5) * 0.55f) * scale * GetAnimatedThemeSymbolPulse(i, 923u, animationTime, 0.032f, 0.14f);
+                        drawList.AddCircleFilled(p, radius, Color(Alpha(i % 2 == 0 ? Vector4.One : color, 0.18f + (i % 4) * 0.03f)), 14);
+                        if (i % 3 == 0)
+                            drawList.AddCircle(p, radius + 3f * scale, Color(Alpha(color, 0.16f)), 16, 1f * scale);
+                    }
+                }
+                break;
+
+            case "Chocolate":
+                for (var y = min.Y + 16f * scale; y < max.Y; y += 42f * scale)
+                {
+                    drawList.AddLine(new Vector2(min.X + 8f * scale, y), new Vector2(max.X - 8f * scale, y + 13f * scale), Color(Alpha(color, 0.26f)), 3.1f * scale);
+                    drawList.AddLine(new Vector2(min.X + 8f * scale, y + 8f * scale), new Vector2(max.X - 8f * scale, y + 22f * scale), Color(new Vector4(0.18f, 0.08f, 0.035f, 0.28f)), 1.7f * scale);
+                }
+                for (var i = 0; i < 45; i++)
+                {
+                    var x = min.X + ((i * 67) % MathF.Max(1f, width));
+                    var y = min.Y + ((i * 31) % MathF.Max(1f, height));
+                    drawList.AddCircleFilled(new Vector2(x, y), (3f + (i % 3)) * scale, Color(Alpha(Lighten(color, 0.10f), 0.13f)), 12);
+                }
+                break;
+
+            case "Cyberpunk":
+                for (var i = 0; i < 55; i++)
+                {
+                    var x = min.X + ((i * 71) % MathF.Max(1f, width));
+                    var y = min.Y + ((i * 43) % MathF.Max(1f, height));
+                    drawList.AddLine(new Vector2(x, y), new Vector2(x + 48f * scale, y + 10f * scale), Color(Alpha(color, 0.38f)), 1.7f * scale);
+                    drawList.AddLine(new Vector2(x + 10f * scale, y + 16f * scale), new Vector2(x + 55f * scale, y + 16f * scale), Color(new Vector4(0.10f, 0.95f, 1f, 0.26f)), 1.15f * scale);
+                    drawList.AddCircle(new Vector2(x + 18f * scale, y + 4f * scale), 6f * scale, Color(Alpha(light, 0.26f)), 12, 1.15f * scale);
+                }
+                break;
+
+            case "Water":
+                for (var y = min.Y + 14f * scale; y < max.Y; y += 28f * scale)
+                {
+                    var previous = new Vector2(min.X + 8f * scale, y);
+                    for (var x = min.X + 18f * scale; x < max.X - 8f * scale; x += 13f * scale)
+                    {
+                        var t = (x - min.X) / MathF.Max(1f, width);
+                        var current = new Vector2(x, y + MathF.Sin((t * MathF.PI * 3.1f) + y * 0.015f) * 8f * scale);
+                        drawList.AddLine(previous, current, Color(Alpha(color, 0.32f)), 1.7f * scale);
+                        previous = current;
+                    }
+                }
+                {
+                    var inset = 8f * scale;
+                    var spreadWidth = MathF.Max(1f, width - inset * 2f);
+                    var spreadHeight = MathF.Max(1f, height - inset * 2f);
+                    for (var i = 0; i < 44; i++)
+                    {
+                        var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 44, 941u, animationTime, 5.8f * scale, 0.042f, true);
+                        var radius = (4f + (i % 4)) * scale * GetAnimatedThemeSymbolPulse(i, 943u, animationTime, 0.028f, 0.14f);
+                        drawList.AddCircle(p, radius, Color(Alpha(light, 0.18f)), 16, 1f * scale);
+                    }
+                }
+                break;
+
+            case "Fire":
+                {
+                    var inset = 8f * scale;
+                    var spreadWidth = MathF.Max(1f, width - inset * 2f);
+                    var spreadHeight = MathF.Max(1f, height - inset * 2f);
+
+                    for (var i = 0; i < 92; i++)
+                    {
+                        var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 92, 961u, animationTime, 5.2f * scale, 0.052f, true);
+                        var c = i % 3 == 0 ? color : i % 3 == 1 ? Lighten(color, 0.22f) : new Vector4(1f, 0.86f, 0.24f, 1f);
+                        var radius = (2.2f + (i % 5) * 0.55f) * scale * GetAnimatedThemeSymbolPulse(i, 963u, animationTime, 0.040f, 0.15f);
+                        drawList.AddCircleFilled(p, radius, Color(Alpha(c, 0.18f + (i % 3) * 0.06f)), 12);
+                    }
+
+                    for (var y = max.Y - 14f * scale; y > min.Y; y -= 45f * scale)
+                        drawList.AddLine(new Vector2(min.X + 10f * scale, y), new Vector2(max.X - 10f * scale, y - 24f * scale), Color(Alpha(color, 0.32f)), 2.2f * scale);
+                }
+                break;
+
+            case "Sakura":
+                {
+                    var inset = 8f * scale;
+                    var spreadWidth = MathF.Max(1f, width - inset * 2f);
+                    var spreadHeight = MathF.Max(1f, height - inset * 2f);
+
+                    for (var i = 0; i < 120; i++)
+                    {
+                        var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 120, 981u, animationTime, 6.2f * scale, 0.044f, true);
+                        var r = (2.1f + (i % 5) * 0.72f) * scale * GetAnimatedThemeSymbolPulse(i, 983u, animationTime, 0.032f, 0.15f);
+                        var c = i % 3 == 0 ? color : i % 3 == 1 ? Lighten(color, 0.18f) : new Vector4(0.72f, 0.30f, 0.22f, 1f);
+                        drawList.AddCircleFilled(p, r, Color(Alpha(c, 0.16f + (i % 4) * 0.035f)), 12);
+                        if (i % 4 == 0)
+                        {
+                            var offsetAngle = GetAnimatedThemeSymbolAngle(i, 987u, animationTime, 0.035f);
+                            var offset = new Vector2(MathF.Cos(offsetAngle), MathF.Sin(offsetAngle)) * (2.6f * scale);
+                            drawList.AddCircleFilled(p + offset, r * 0.55f, Color(new Vector4(1f, 0.92f, 0.96f, 0.12f)), 10);
+                        }
+                    }
+                }
+                break;
+
+            case "Autumn":
+                {
+                    var inset = 16f * scale;
+                    var spreadWidth = MathF.Max(1f, width - inset * 2f);
+                    var spreadHeight = MathF.Max(1f, height - 24f * scale);
+
+                    for (var i = 0; i < 100; i++)
+                    {
+                        var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 100, 1001u, animationTime, 6.0f * scale, 0.040f, true);
+                        p.Y += 4f * scale;
+                        var size = (6.0f + (i % 7) * 1.35f) * scale * GetAnimatedThemeSymbolPulse(i, 1003u, animationTime, 0.030f, 0.12f);
+                        var angle = GetAnimatedThemeSymbolAngle(i, 1009u, animationTime, 0.050f);
+                        var c = i % 4 == 0 ? new Vector4(0.56f, 0.50f, 0.20f, 1f) : i % 4 == 1 ? color : i % 4 == 2 ? new Vector4(0.92f, 0.58f, 0.16f, 1f) : new Vector4(0.64f, 0.08f, 0.10f, 1f);
+                        DrawAutumnLeaf(drawList, p, size, angle, Alpha(c, 0.16f + (i % 5) * 0.035f));
+                    }
+                }
+                break;
+
+            case "Frost":
+                {
+                    var inset = 10f * scale;
+                    var spreadWidth = MathF.Max(1f, width - inset * 2f);
+                    var spreadHeight = MathF.Max(1f, height - inset * 2f);
+                    for (var i = 0; i < 52; i++)
+                    {
+                        var center = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 52, 801u, animationTime, 6f * scale, 0.045f, true);
+                        var angle = GetAnimatedThemeSymbolAngle(i, 809u, animationTime, 0.055f);
+                        var pulse = GetAnimatedThemeSymbolPulse(i, 811u, animationTime, 0.032f, 0.10f);
+                        var radius = 6.3f * scale * pulse;
+                        var c = Alpha(i % 2 == 0 ? light : color, 0.16f + (i % 3) * 0.035f);
+                        DrawFrostSymbol(drawList, center, radius, angle, 1.05f * scale, c);
+                    }
+                }
+                break;
+
+            case "Stars":
+                {
+                    var inset = 8f * scale;
+                    var spreadWidth = MathF.Max(1f, width - inset * 2f);
+                    var spreadHeight = MathF.Max(1f, height - inset * 2f);
+                    for (var i = 0; i < 120; i++)
+                    {
+                        var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 120, 851u, animationTime, 4.2f * scale, 0.034f, false);
+                        var c = Color(Alpha(i % 2 == 0 ? light : Vector4.One, 0.18f + (i % 5) * 0.03f));
+                        var radius = (1.2f + (i % 4) * 0.45f) * scale * GetAnimatedThemeSymbolPulse(i, 857u, animationTime, 0.030f, 0.14f);
+                        drawList.AddCircleFilled(p, radius, c, 8);
+                        if (i % 6 == 0)
+                        {
+                            var angle = GetAnimatedThemeSymbolAngle(i, 859u, animationTime, 0.050f);
+                            var direction = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+                            var side = new Vector2(-direction.Y, direction.X);
+                            drawList.AddLine(p - direction * (4f * scale), p + direction * (4f * scale), c, 0.8f * scale);
+                            drawList.AddLine(p - side * (4f * scale), p + side * (4f * scale), c, 0.8f * scale);
+                        }
+                    }
+                }
+                break;
+
+            case "Grid":
+                for (var x = min.X + 18f * scale; x < max.X; x += 32f * scale)
+                    drawList.AddLine(new Vector2(x, min.Y), new Vector2(x + 18f * scale, max.Y), Color(Alpha(color, 0.20f)), 1f * scale);
+                for (var y = min.Y + 18f * scale; y < max.Y; y += 32f * scale)
+                    drawList.AddLine(new Vector2(min.X, y), new Vector2(max.X, y + 10f * scale), Color(Alpha(light, 0.14f)), 1f * scale);
+                break;
+
+            default:
+                for (var i = 0; i < 96; i++)
+                {
+                    var x = min.X + ((i * 37) % MathF.Max(1f, width));
+                    var y = min.Y + ((i * 53) % MathF.Max(1f, height));
+                    var radius = (i % 4 == 0 ? 2.7f : 1.45f) * scale;
+                    drawList.AddCircleFilled(new Vector2(x, y), radius, Color(Alpha(i % 3 == 0 ? light : color, 0.18f + (i % 4) * 0.03f)), 12);
+                }
+                break;
+        }
+    }
+
+    private Vector4 GetCustomBackgroundEffectColor(string effect)
+    {
+        if (config.CustomBackgroundEffectColorHex.TryGetValue(effect, out var hex))
+            return UiColors.WithAlpha(UiColors.HexToRgba(hex), 1f);
+
+        return effect switch
+        {
+            "All Red" => new Vector4(1f, 0.26f, 0.26f, 1f),
+            "All Gold" => new Vector4(1f, 0.78f, 0.27f, 1f),
+            "White Gold" => new Vector4(1f, 0.92f, 0.58f, 1f),
+            "Chocolate" => new Vector4(0.82f, 0.48f, 0.26f, 1f),
+            "Cyberpunk" => new Vector4(0.78f, 0.34f, 1f, 1f),
+            "Water" => new Vector4(0.38f, 0.84f, 1f, 1f),
+            "Fire" => new Vector4(1f, 0.52f, 0.16f, 1f),
+            "Sakura" => new Vector4(1f, 0.60f, 0.80f, 1f),
+            "Autumn" => new Vector4(0.90f, 0.38f, 0.12f, 1f),
+            "Frost" => new Vector4(0.76f, 0.97f, 1f, 1f),
+            "Stars" => new Vector4(0.85f, 0.84f, 1f, 1f),
+            "Grid" => new Vector4(0.35f, 1f, 0.78f, 1f),
+            _ => config.AccentColor,
+        };
+    }
+
+    private void DrawThemeBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max)
+    {
+        var preset = config.ThemePresetName ?? "Default";
+        var scale = ImGuiHelpers.GlobalScale;
+        var width = max.X - min.X;
+        var height = max.Y - min.Y;
+        if (width <= 8f || height <= 8f)
+            return;
+
+        drawList.PushClipRect(min, max, true);
+
+        switch (preset)
+        {
+            case "Default":
+                DrawDefaultBackdrop(drawList, min, max, scale, width, height);
+                break;
+
+            case "All Red":
+                DrawRedBackdrop(drawList, min, max, scale, width, height);
+                break;
+
+            case "All Gold":
+                DrawGoldBackdrop(drawList, min, max, scale, width, height);
+                break;
+
+            case "White Gold":
+                DrawWhiteGoldBackdrop(drawList, min, max, scale, width, height);
+                break;
+
+            case "Chocolate":
+                DrawChocolateBackdrop(drawList, min, max, scale, width, height);
+                break;
+
+            case "Cyberpunk":
+                DrawCyberpunkBackdrop(drawList, min, max, scale, width, height);
+                break;
+
+            case "Water":
+                DrawWaterBackdrop(drawList, min, max, scale, width, height);
+                break;
+
+            case "Fire":
+                DrawFireBackdrop(drawList, min, max, scale, width, height);
+                break;
+
+            case "Sakura":
+                DrawSakuraBackdrop(drawList, min, max, scale, width, height);
+                break;
+
+            case "Autumn":
+                DrawAutumnBackdrop(drawList, min, max, scale, width, height);
+                break;
+
+            case "Frost":
+                DrawFrostBackdrop(drawList, min, max, scale, width, height);
+                break;
+        }
+
+        drawList.PopClipRect();
+    }
+
+    private void DrawDefaultBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
+    {
+        for (var y = min.Y + 28f * scale; y < max.Y; y += 52f * scale)
+            drawList.AddLine(new Vector2(min.X + 14f * scale, y), new Vector2(max.X - 14f * scale, y + 10f * scale), Color(new Vector4(0.10f, 0.78f, 0.60f, 0.075f)), 1.2f * scale);
+
+        for (var i = 0; i < 54; i++)
+        {
+            var x = min.X + 12f * scale + ((i * 43) % MathF.Max(1f, width - 24f * scale));
+            var y = min.Y + 16f * scale + ((i * 61) % MathF.Max(1f, height - 32f * scale));
+            var radius = (i % 5 == 0 ? 1.9f : 1.1f) * scale;
+            drawList.AddCircleFilled(new Vector2(x, y), radius, Color(new Vector4(0.16f, 0.86f, 0.67f, 0.13f)), 10);
+        }
+
+        for (var x = min.X + 34f * scale; x < max.X; x += 82f * scale)
+            drawList.AddLine(new Vector2(x, min.Y + 18f * scale), new Vector2(x + 18f * scale, max.Y - 18f * scale), Color(new Vector4(0.05f, 0.32f, 0.25f, 0.06f)), 1f * scale);
+    }
+
+    private void DrawRedBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
+    {
+        for (var y = min.Y + 18f * scale; y < max.Y; y += 34f * scale)
+        {
+            drawList.AddLine(new Vector2(min.X + 10f * scale, y), new Vector2(max.X - 10f * scale, y + 12f * scale), Color(new Vector4(1f, 0.08f, 0.10f, 0.16f)), 1.6f * scale);
+            drawList.AddLine(new Vector2(min.X + 10f * scale, y + 7f * scale), new Vector2(max.X - 10f * scale, y + 19f * scale), Color(new Vector4(0.55f, 0.02f, 0.04f, 0.10f)), 1.1f * scale);
+        }
+    }
+
+    private void DrawGoldBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
+    {
+        var time = (float)ImGui.GetTime();
+        var inset = 8f * scale;
+        var spreadWidth = MathF.Max(1f, width - inset * 2f);
+        var spreadHeight = MathF.Max(1f, height - inset * 2f);
+
+        for (var i = 0; i < 90; i++)
+        {
+            var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 90, 501u, time, 3.0f * scale, 0.035f, false);
+            var radius = (i % 4 == 0 ? 2.4f : 1.45f) * scale * GetAnimatedThemeSymbolPulse(i, 503u, time, 0.030f, 0.12f);
+            drawList.AddCircleFilled(p, radius, Color(new Vector4(1f, 0.72f, 0.18f, 0.24f)), 12);
+        }
+
+        for (var y = min.Y + 26f * scale; y < max.Y; y += 72f * scale)
+            drawList.AddLine(new Vector2(min.X + 14f * scale, y), new Vector2(max.X - 14f * scale, y), Color(new Vector4(1f, 0.82f, 0.32f, 0.10f)), 1.4f * scale);
+    }
+
+    private void DrawWhiteGoldBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
+    {
+        // Softer pattern: large corner bloom + light gold constellation dots.
+        drawList.AddCircleFilled(min + new Vector2(width * 0.18f, height * 0.18f), 72f * scale, Color(new Vector4(1f, 0.92f, 0.62f, 0.055f)), 36);
+        drawList.AddCircleFilled(max - new Vector2(width * 0.18f, height * 0.24f), 92f * scale, Color(new Vector4(1f, 1f, 1f, 0.040f)), 36);
+
+        var time = (float)ImGui.GetTime();
+        var inset = 18f * scale;
+        var spreadWidth = MathF.Max(1f, width - inset * 2f);
+        var spreadHeight = MathF.Max(1f, height - 22f * scale * 2f);
+
+        for (var i = 0; i < 34; i++)
+        {
+            var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 34, 541u, time, 3.6f * scale, 0.030f, false);
+            p.Y += 4f * scale;
+            var radius = (i % 6 == 0 ? 2.2f : 1.2f) * scale * GetAnimatedThemeSymbolPulse(i, 547u, time, 0.026f, 0.11f);
+            var color = i % 3 == 0
+                ? new Vector4(1f, 1f, 1f, 0.16f)
+                : new Vector4(1f, 0.78f, 0.28f, 0.17f);
+            drawList.AddCircleFilled(p, radius, Color(color), 10);
+
+            if (i % 4 == 0)
+            {
+                var angle = GetAnimatedThemeSymbolAngle(i, 557u, time, 0.045f);
+                var direction = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+                drawList.AddLine(p - direction * (7f * scale), p + direction * (7f * scale), Color(new Vector4(1f, 0.86f, 0.42f, 0.10f)), 1f * scale);
+            }
+        }
+    }
+
+    private void DrawChocolateBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
+    {
+        // Reworked: subtle cocoa "swirl" arcs and warm dots instead of dense diagonal stripes.
+        for (var i = 0; i < 9; i++)
+        {
+            var center = new Vector2(min.X + (18f + i * 58f) * scale, min.Y + (48f + (i % 4) * 116f) * scale);
+            var radius = (34f + (i % 3) * 10f) * scale;
+            drawList.AddCircle(center, radius, Color(new Vector4(0.78f, 0.43f, 0.24f, 0.105f)), 40, 1.25f * scale);
+            drawList.AddCircle(center + new Vector2(10f, -5f) * scale, radius * 0.62f, Color(new Vector4(0.35f, 0.16f, 0.08f, 0.105f)), 32, 1f * scale);
+        }
+
+        for (var i = 0; i < 16; i++)
+        {
+            var x = min.X + ((i * 67) % MathF.Max(1f, width));
+            var y = min.Y + ((i * 53) % MathF.Max(1f, height));
+            var color = i % 2 == 0
+                ? new Vector4(0.82f, 0.52f, 0.30f, 0.14f)
+                : new Vector4(0.26f, 0.12f, 0.06f, 0.15f);
+            drawList.AddCircleFilled(new Vector2(x, y), (1.4f + (i % 3) * 0.35f) * scale, Color(color), 10);
+        }
+    }
+
+    private void DrawCyberpunkBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
+    {
+        for (var x = min.X + 18f * scale; x < max.X; x += 48f * scale)
+            drawList.AddLine(new Vector2(x, min.Y + 8f * scale), new Vector2(x, max.Y - 8f * scale), Color(new Vector4(0.04f, 0.88f, 1.00f, 0.14f)), 1.4f * scale);
+
+        for (var y = min.Y + 24f * scale; y < max.Y; y += 52f * scale)
+            drawList.AddLine(new Vector2(min.X + 8f * scale, y), new Vector2(max.X - 8f * scale, y + 18f * scale), Color(new Vector4(1.00f, 0.18f, 0.82f, 0.15f)), 1.6f * scale);
+
+        for (var i = 0; i < 22; i++)
+        {
+            var x = min.X + ((i * 71) % MathF.Max(1f, width));
+            var y = min.Y + ((i * 43) % MathF.Max(1f, height));
+            drawList.AddRect(new Vector2(x, y), new Vector2(x + 12f * scale, y + 7f * scale), Color(new Vector4(0.78f, 0.34f, 1f, 0.17f)), 1.5f * scale, ImDrawFlags.None, 1.1f * scale);
+        }
+    }
+
+    private void DrawWaterBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
+    {
+        for (var y = min.Y + 14f * scale; y < max.Y; y += 26f * scale)
+        {
+            var last = new Vector2(min.X + 8f * scale, y);
+            for (var x = min.X + 10f * scale; x < max.X - 8f * scale; x += 12f * scale)
+            {
+                var point = new Vector2(x, y + MathF.Sin((x - min.X) / (18f * scale)) * 7.5f * scale);
+                drawList.AddLine(last, point, Color(new Vector4(0.26f, 0.80f, 1.00f, 0.22f)), 1.75f * scale);
+                last = point;
+            }
+        }
+
+        var time = (float)ImGui.GetTime();
+        var inset = 8f * scale;
+        var spreadWidth = MathF.Max(1f, width - inset * 2f);
+        var spreadHeight = MathF.Max(1f, height - inset * 2f);
+
+        for (var i = 0; i < 46; i++)
+        {
+            var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 46, 601u, time, 4.4f * scale, 0.032f, true);
+            var radius = (4f + (i % 4)) * scale * GetAnimatedThemeSymbolPulse(i, 607u, time, 0.024f, 0.10f);
+            drawList.AddCircle(p, radius, Color(new Vector4(0.70f, 0.96f, 1f, 0.14f)), 16, 1f * scale);
+        }
+    }
+
+    private void DrawFireBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
+    {
+        var time = (float)ImGui.GetTime();
+        var inset = 8f * scale;
+        var spreadWidth = MathF.Max(1f, width - inset * 2f);
+        var spreadHeight = MathF.Max(1f, height - inset * 2f);
+
+        for (var i = 0; i < 96; i++)
+        {
+            var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 96, 641u, time, 4.0f * scale, 0.040f, true);
+            var color = i % 3 == 0
+                ? new Vector4(1f, 0.16f, 0.04f, 0.26f)
+                : i % 3 == 1
+                    ? new Vector4(1f, 0.48f, 0.08f, 0.22f)
+                    : new Vector4(1f, 0.78f, 0.18f, 0.18f);
+            var radius = (2.2f + (i % 5) * 0.55f) * scale * GetAnimatedThemeSymbolPulse(i, 647u, time, 0.034f, 0.10f);
+            drawList.AddCircleFilled(p, radius, Color(color), 12);
+        }
+
+        for (var y = max.Y - 14f * scale; y > min.Y; y -= 48f * scale)
+            drawList.AddLine(new Vector2(min.X + 10f * scale, y), new Vector2(max.X - 10f * scale, y - 26f * scale), Color(new Vector4(1f, 0.26f, 0.05f, 0.22f)), 2.1f * scale);
+    }
+
+    private void DrawSakuraBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
+    {
+        var time = (float)ImGui.GetTime();
+        var inset = 8f * scale;
+        var spreadWidth = MathF.Max(1f, width - inset * 2f);
+        var spreadHeight = MathF.Max(1f, height - inset * 2f);
+
+        for (var i = 0; i < 128; i++)
+        {
+            var petalColor = i % 3 == 0
+                ? new Vector4(1f, 0.56f, 0.76f, 0.27f)
+                : i % 3 == 1
+                    ? new Vector4(1f, 0.76f, 0.86f, 0.22f)
+                    : new Vector4(0.70f, 0.30f, 0.22f, 0.14f);
+
+            var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 128, 681u, time, 5.4f * scale, 0.033f, true);
+            var size = (2.1f + (i % 5) * 0.55f) * scale * GetAnimatedThemeSymbolPulse(i, 683u, time, 0.025f, 0.08f);
+            drawList.AddCircleFilled(p, size, Color(petalColor), 10);
+            if (i % 3 == 0)
+                drawList.AddCircleFilled(p + new Vector2(2.2f, 1.0f) * scale, size * 0.62f, Color(new Vector4(1f, 0.92f, 0.96f, 0.14f)), 10);
+        }
+
+        for (var y = min.Y + 40f * scale; y < max.Y; y += 88f * scale)
+            drawList.AddLine(new Vector2(min.X + 10f * scale, y), new Vector2(max.X - 10f * scale, y + 22f * scale), Color(new Vector4(0.42f, 0.18f, 0.12f, 0.13f)), 1.3f * scale);
+    }
+
+    private void DrawAutumnBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
+    {
+        var leafColors = new[]
+        {
+            new Vector4(0.58f, 0.27f, 0.12f, 0.26f),
+            new Vector4(0.82f, 0.32f, 0.12f, 0.24f),
+            new Vector4(0.95f, 0.55f, 0.16f, 0.22f),
+            new Vector4(0.55f, 0.50f, 0.20f, 0.20f),
+            new Vector4(0.82f, 0.63f, 0.20f, 0.21f),
+            new Vector4(0.62f, 0.08f, 0.10f, 0.23f),
+        };
+
+        var time = (float)ImGui.GetTime();
+        var inset = 16f * scale;
+        var spreadWidth = MathF.Max(1f, width - inset * 2f);
+        var spreadHeight = MathF.Max(1f, height - 24f * scale);
+
+        for (var i = 0; i < 105; i++)
+        {
+            var p = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 105, 701u, time, 5.0f * scale, 0.030f, true);
+            p.Y += 4f * scale;
+            var size = (6.0f + (i % 7) * 1.35f) * scale * GetAnimatedThemeSymbolPulse(i, 709u, time, 0.023f, 0.08f);
+            var angle = GetAnimatedThemeSymbolAngle(i, 719u, time, 0.040f);
+            var contrast = 0.78f + (i % 5) * 0.08f;
+            var color = leafColors[i % leafColors.Length];
+            color = new Vector4(MathF.Min(1f, color.X * contrast), MathF.Min(1f, color.Y * contrast), MathF.Min(1f, color.Z * contrast), color.W * (0.74f + (i % 4) * 0.10f));
+            DrawAutumnLeaf(drawList, p, size, angle, color);
+        }
+
+        for (var y = min.Y + 24f * scale; y < max.Y; y += 64f * scale)
+            drawList.AddLine(new Vector2(min.X + 12f * scale, y), new Vector2(max.X - 12f * scale, y + 20f * scale), Color(new Vector4(0.95f, 0.36f, 0.10f, 0.11f)), 1.3f * scale);
+    }
+
+    private void DrawAutumnLeaf(ImDrawListPtr drawList, Vector2 center, float size, float angle, Vector4 color)
+    {
+        var forward = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
+        var side = new Vector2(-forward.Y, forward.X);
+        var points = new[]
+        {
+            center + forward * size,
+            center + side * (size * 0.48f),
+            center - forward * (size * 0.18f) + side * (size * 0.28f),
+            center - forward * (size * 0.62f),
+            center - forward * (size * 0.18f) - side * (size * 0.28f),
+            center - side * (size * 0.48f),
+        };
+
+        var c = Color(color);
+        drawList.AddTriangleFilled(points[0], points[1], points[2], c);
+        drawList.AddTriangleFilled(points[0], points[2], points[3], c);
+        drawList.AddTriangleFilled(points[0], points[3], points[4], c);
+        drawList.AddTriangleFilled(points[0], points[4], points[5], c);
+        drawList.AddLine(center - forward * (size * 0.55f), center + forward * (size * 0.72f), Color(new Vector4(0.12f, 0.07f, 0.025f, color.W * 0.65f)), MathF.Max(0.75f, size * 0.055f));
+    }
+
+
+    private void DrawFrostBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
+    {
+        var safeWidth = MathF.Max(1f, width);
+        var safeHeight = MathF.Max(1f, height);
+        var inset = 12f * scale;
+        var spreadWidth = MathF.Max(1f, safeWidth - inset * 2f);
+        var spreadHeight = MathF.Max(1f, safeHeight - inset * 2f);
+        var time = (float)ImGui.GetTime();
+
+        for (var i = 0; i < 38; i++)
+        {
+            var center = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 38, 17u, time, 6.5f * scale, 0.045f, true);
+            var angle = GetAnimatedThemeSymbolAngle(i, 73u, time, 0.055f);
+            var pulse = GetAnimatedThemeSymbolPulse(i, 211u, time, 0.035f, 0.10f);
+            var radius = (4.8f + ThemeRandom01(i, 109u) * 4.8f) * scale * pulse;
+            var thickness = (0.75f + ThemeRandom01(i, 151u) * 0.45f) * scale;
+            var alpha = 0.08f + ThemeRandom01(i, 193u) * 0.07f;
+            DrawFrostSymbol(drawList, center, radius, angle, thickness, new Vector4(0.84f, 0.98f, 1f, alpha));
+        }
+
+        for (var i = 0; i < 16; i++)
+        {
+            var center = GetAnimatedThemeSymbolPoint(min, inset, spreadWidth, spreadHeight, i, 16, 277u, time, 4.5f * scale, 0.038f, false);
+            var radius = (3.5f + ThemeRandom01(i, 389u) * 5.5f) * scale * GetAnimatedThemeSymbolPulse(i, 431u, time, 0.028f, 0.12f);
+            var alpha = 0.035f + ThemeRandom01(i, 431u) * 0.04f;
+            drawList.AddCircle(center, radius, Color(new Vector4(0.90f, 0.99f, 1f, alpha)), 16, 1f * scale);
+        }
+    }
+
+    private static void DrawFrostSymbol(ImDrawListPtr drawList, Vector2 center, float radius, float angle, float thickness, Vector4 color)
+    {
+        var c = Color(color);
+        for (var arm = 0; arm < 4; arm++)
+        {
+            var armAngle = angle + arm * MathF.PI * 0.25f;
+            var direction = new Vector2(MathF.Cos(armAngle), MathF.Sin(armAngle));
+            drawList.AddLine(center - direction * radius, center + direction * radius, c, thickness);
+        }
+    }
+
+    private static Vector2 GetAnimatedThemeSymbolPoint(Vector2 min, float inset, float spreadWidth, float spreadHeight, int index, int totalCount, uint salt, float time, float amplitude, float speed, bool drift)
+    {
+        totalCount = Math.Max(1, totalCount);
+        var safeWidth = MathF.Max(1f, spreadWidth);
+        var safeHeight = MathF.Max(1f, spreadHeight);
+        var aspect = safeWidth / safeHeight;
+        var columns = Math.Max(1, (int)MathF.Round(MathF.Sqrt(totalCount * aspect)));
+        var rows = Math.Max(1, (int)MathF.Ceiling(totalCount / (float)columns));
+        var cellWidth = safeWidth / columns;
+        var cellHeight = safeHeight / rows;
+
+        var permutedIndex = GetThemePermutationIndex(index, totalCount, salt + 17u);
+        var column = permutedIndex % columns;
+        var row = permutedIndex / columns;
+        if (row >= rows)
+            row = rows - 1;
+
+        var jitterX = 0.20f + ThemeRandom01(index, salt) * 0.60f;
+        var jitterY = 0.20f + ThemeRandom01(index, salt + 37u) * 0.60f;
+        var baseX = min.X + inset + column * cellWidth + cellWidth * jitterX;
+        var baseY = min.Y + inset + row * cellHeight + cellHeight * jitterY;
+        var phaseA = ThemeRandom01(index, salt + 79u) * MathF.PI * 2f;
+        var phaseB = ThemeRandom01(index, salt + 131u) * MathF.PI * 2f;
+        var direction = ThemeRandom01(index, salt + 181u) * MathF.PI * 2f;
+        var motionAmplitude = amplitude * 2.25f;
+        var personalSpeed = speed * (3.9f + ThemeRandom01(index, salt + 223u) * 2.2f);
+        var t = time * personalSpeed;
+
+        var circular = new Vector2(MathF.Cos(direction + t + phaseA), MathF.Sin(direction + t * 0.82f + phaseB)) * motionAmplitude;
+        var wandering = new Vector2(MathF.Sin(t * 0.47f + phaseB), MathF.Cos(t * 0.39f + phaseA)) * (motionAmplitude * 0.36f);
+        var slowDrift = drift
+            ? new Vector2(MathF.Cos(direction), MathF.Sin(direction)) * (MathF.Sin(t * 0.31f + phaseA) * motionAmplitude * 0.42f)
+            : Vector2.Zero;
+
+        return WrapThemeSymbolPoint(new Vector2(baseX, baseY) + circular + wandering + slowDrift, min, inset, spreadWidth, spreadHeight);
+    }
+
+    private static int GetThemePermutationIndex(int index, int totalCount, uint salt)
+    {
+        if (totalCount <= 1)
+            return 0;
+
+        var offset = (int)(salt % (uint)totalCount);
+        var step = Math.Max(1, (int)((salt / 7u) % (uint)totalCount));
+
+        while (GreatestCommonDivisor(step, totalCount) != 1)
+            step++;
+
+        return (index * step + offset) % totalCount;
+    }
+
+    private static int GreatestCommonDivisor(int a, int b)
+    {
+        a = Math.Abs(a);
+        b = Math.Abs(b);
+
+        while (b != 0)
+        {
+            var temp = a % b;
+            a = b;
+            b = temp;
+        }
+
+        return a == 0 ? 1 : a;
+    }
+
+    private static Vector2 WrapThemeSymbolPoint(Vector2 point, Vector2 min, float inset, float spreadWidth, float spreadHeight)
+    {
+        var left = min.X + inset;
+        var top = min.Y + inset;
+        var x = left + PositiveModulo(point.X - left, spreadWidth);
+        var y = top + PositiveModulo(point.Y - top, spreadHeight);
+        return new Vector2(x, y);
+    }
+
+    private static float PositiveModulo(float value, float modulo)
+    {
+        if (modulo <= 0f)
+            return 0f;
+
+        var result = value % modulo;
+        return result < 0f ? result + modulo : result;
+    }
+
+    private static float GetAnimatedThemeSymbolAngle(int index, uint salt, float time, float speed)
+    {
+        var baseAngle = ThemeRandom01(index, salt) * MathF.PI * 2f;
+        var direction = ThemeRandom01(index, salt + 11u) > 0.5f ? 1f : -1f;
+        var personalSpeed = speed * (4.8f + ThemeRandom01(index, salt + 23u) * 2.2f);
+        return baseAngle + time * personalSpeed * direction;
+    }
+
+    private static float GetAnimatedThemeSymbolPulse(int index, uint salt, float time, float speed, float strength)
+    {
+        if (ThemeRandom01(index, salt + 59u) < 0.42f)
+            return 1f;
+
+        var phase = ThemeRandom01(index, salt + 83u) * MathF.PI * 2f;
+        var personalSpeed = speed * (4.5f + ThemeRandom01(index, salt + 101u) * 2.5f);
+        return 1f + MathF.Sin(time * personalSpeed + phase) * strength;
+    }
+
+    private static float ThemeRandom01(int index, uint salt)
+    {
+        unchecked
+        {
+            var value = (uint)index + 0x9E3779B9u + salt * 0x85EBCA6Bu;
+            value ^= value >> 16;
+            value *= 0x7FEB352Du;
+            value ^= value >> 15;
+            value *= 0x846CA68Bu;
+            value ^= value >> 16;
+            return (value & 0x00FFFFFFu) / 16777216f;
+        }
+    }
+
+    private void DrawCompactSidebarColumn(ImDrawListPtr drawList, float sidebarWidth, float bodyHeight, out Vector2 sidebarRailWindowPos, out Vector2 sidebarRailWindowSize)
+    {
+        sidebarRailWindowPos = Vector2.Zero;
+        sidebarRailWindowSize = Vector2.Zero;
+
+        using var sidebarColumn = ImRaii.Child("compact-sidebar-column", new Vector2(sidebarWidth, bodyHeight), false);
+        if (!sidebarColumn)
+            return;
+
+        DrawSidebarColumnPattern(ImGui.GetWindowDrawList(), ImGui.GetWindowPos(), ImGui.GetWindowSize());
+
+        using (ImRaii.PushStyle(ImGuiStyleVar.ChildRounding, CompactSidebarRailRounding * ImGuiHelpers.GlobalScale))
+        using (ImRaii.PushColor(ImGuiCol.ChildBg, UiColors.WithAlpha(UiColors.Get("ButtonDefault"), CompactSidebarRailBackgroundAlpha)))
+        using (ImRaii.PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, CompactSidebarRailBorderAlpha)))
+        {
+            using var sidebarRail = ImRaii.Child("compact-sidebar-rail", new Vector2(0f, 0f), true);
+            if (!sidebarRail)
+                return;
+
+            sidebarRailWindowPos = ImGui.GetWindowPos();
+            sidebarRailWindowSize = ImGui.GetWindowSize();
+
+            var scale = ImGuiHelpers.GlobalScale;
+            var footerReserve = (CompactSidebarToggleHeight + CompactSidebarToggleBottomPadding) * scale;
+            var sidebarContentHeight = MathF.Max(1f, ImGui.GetContentRegionAvail().Y - footerReserve);
+            using (var sidebarButtons = ImRaii.Child("compact-sidebar-buttons-content", new Vector2(0f, sidebarContentHeight), false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse))
+            {
+                if (sidebarButtons)
+                {
+                    using (ImRaii.PushId("compact-sidebar-buttons"))
+                        DrawSidebarButtons();
+                }
+            }
+
+            var toggleHeight = CompactSidebarToggleHeight * scale;
+            var remainingHeight = ImGui.GetContentRegionAvail().Y;
+            if (remainingHeight > toggleHeight)
+                ImGui.SetCursorPosY(ImGui.GetCursorPosY() + remainingHeight - toggleHeight);
+
+            DrawCompactSidebarSideToggleButton();
+        }
+    }
+
+    private void DrawCompactMainColumn(ImDrawListPtr drawList, float mainColumnWidth, float bodyHeight, float gradientInset)
+    {
+        using var mainColumn = ImRaii.Child("compact-main-column", new Vector2(mainColumnWidth, bodyHeight), false);
+        if (!mainColumn)
+            return;
+
+        windowContentWidth = GetWindowContentRegionWidth();
+        var style = ImGui.GetStyle();
+
+        var childMin = ImGui.GetWindowPos();
+        var childMax = childMin + ImGui.GetWindowSize();
+        DrawThemeBackdrop(ImGui.GetWindowDrawList(), childMin, childMax);
+
+        var drewTopWarnings = DrawCompactTopWarnings();
+        if (drewTopWarnings)
+            ImGuiHelpers.ScaledDummy(CompactWarningBannerSpacing);
+
+        using (ImRaii.PushId("header"))
+            DrawUIDHeader();
+
+        var contentMinY = ImGui.GetWindowPos().Y + ImGui.GetWindowContentRegionMin().Y;
+        var gradientTop = MathF.Max(contentMinY, ImGui.GetCursorScreenPos().Y - style.ItemSpacing.Y + gradientInset);
+
+        using (ImRaii.PushId("compact-main-controls"))
+            DrawMainControls(windowContentWidth);
+
+        ImGui.Dummy(new Vector2(1f, style.ItemSpacing.Y));
+        using (ImRaii.PushId("pairlist"))
+            DrawPairs();
+
+        var footerTop = ImGui.GetCursorScreenPos().Y;
+        var gradientBottom = MathF.Max(gradientTop, footerTop - style.ItemSpacing.Y - gradientInset);
+        DrawMainColumnGradient(drawList, gradientTop, gradientBottom);
+
+    }
+
+    private bool DrawCompactTopWarnings()
+        => false;
+
+    private void DrawUIDHeader()
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var width = windowContentWidth;
+        var height = HeaderHeight * scale;
+        var drawList = ImGui.GetWindowDrawList();
+        var headerStart = ImGui.GetCursorScreenPos();
+        var headerEnd = headerStart + new Vector2(width, height);
+
+        var headerTop = Lighten(Alpha(config.WindowBackgroundColor, MathF.Min(1f, MathF.Max(0.38f, config.WindowBackgroundColor.W))), 0.028f);
+        var headerBottom = Alpha(config.WindowBackgroundColor, 0.0f);
+        drawList.AddRectFilledMultiColor(
+            headerStart,
+            headerEnd,
+            Color(headerTop),
+            Color(headerTop),
+            Color(headerBottom),
+            Color(headerBottom));
+
+        DrawHeaderParticles(drawList, headerStart, new Vector2(width, height));
+        DrawHeaderBottomGradient(drawList, headerStart, headerEnd, width);
+
+        var uidStartX = 16f * scale;
+        var titleFontSize = 20f * scale;
+        var titleIcon = char.ConvertFromUtf32(0xF70E);
+        var titleY = headerStart.Y + MathF.Max(0f, (height - titleFontSize) * 0.5f);
+        var titleIconPos = new Vector2(headerStart.X + uidStartX, titleY + 1f * scale);
+        Vector2 titleIconSize;
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+            titleIconSize = ImGui.CalcTextSize(titleIcon) * (titleFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+
+        drawList.AddText(UiBuilder.IconFont, titleFontSize, titleIconPos + new Vector2(1.2f, 1.2f), Color(new Vector4(0f, 0f, 0f, 0.78f)), titleIcon);
+        drawList.AddText(UiBuilder.IconFont, titleFontSize, titleIconPos, Color(config.AccentColor), titleIcon);
+
+        var titlePos = new Vector2(titleIconPos.X + titleIconSize.X + 7f * scale, titleY);
+        DrawTextWithShadow(drawList, titlePos, Color(config.AccentColor), "Privacy", titleFontSize);
+
+        var activeViewName = GetActiveViewDisplayName();
+        if (!string.IsNullOrWhiteSpace(activeViewName))
+        {
+            var titleSize = ImGui.CalcTextSize("Privacy") * (titleFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            DrawTextWithShadow(drawList, titlePos + new Vector2(titleSize.X + 9f * scale, 0f), Color(Alpha(UiColors.TextDim, 0.56f)), activeViewName, titleFontSize);
+        }
+
+        DrawMinimalModeToggle(headerStart, width, height);
+        DrawCloudHeaderButtons(headerStart, width, height);
+        if (config.HideTopBar)
+        {
+            DrawHeaderWindowControls(headerStart, width, height);
+            HandleHiddenHeaderWindowDrag(headerStart, width, height);
+        }
+
+        ImGui.SetCursorScreenPos(headerStart);
+        ImGui.Dummy(new Vector2(width, height));
+    }
+
+
+    private void DrawCloudHeaderButtons(Vector2 headerStart, float width, float height)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var size = new Vector2(24f, 24f) * scale;
+        var minimalPos = headerStart + new Vector2(width - size.X - 12f * scale, (height - size.Y) * 0.5f);
+        var profilePos = minimalPos - new Vector2(size.X + 5f * scale, 0f);
+        var loginPos = profilePos - new Vector2(size.X + 5f * scale, 0f);
+
+        DrawHeaderIconButton(drawList, loginPos, size, FontAwesomeIcon.Key, "Log In/Log Off", () => loginWindow.IsOpen = true);
+        DrawHeaderIconButton(drawList, profilePos, size, FontAwesomeIcon.User, "My Profile", () => myProfileWindow.Open());
+    }
+
+    private void DrawHeaderIconButton(ImDrawListPtr drawList, Vector2 pos, Vector2 size, FontAwesomeIcon icon, string tooltip, Action click)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        ImGui.SetCursorScreenPos(pos);
+        if (ImGui.InvisibleButton($"header-icon-{tooltip}", size))
+            click();
+
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var iconText = icon.ToIconString();
+            var fontSize = 12.8f * scale;
+            var iconSize = ImGui.CalcTextSize(iconText) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            drawList.AddText(UiBuilder.IconFont, fontSize, pos + (size - iconSize) * 0.5f, Color(hovered ? config.AccentColor : Alpha(UiColors.TextDim, 0.76f)), iconText);
+        }
+
+        if (hovered)
+            ImGui.SetTooltip(tooltip);
+    }
+
+    private void DrawMinimalModeToggle(Vector2 headerStart, float width, float height)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var size = new Vector2(24f, 24f) * scale;
+        var pos = headerStart + new Vector2(width - size.X - 12f * scale, (height - size.Y) * 0.5f);
+        ImGui.SetCursorScreenPos(pos);
+        if (ImGui.InvisibleButton("minimal-mode-toggle", size))
+        {
+            config.MinimalMode = !config.MinimalMode;
+            log.Information("Privacy: minimal contact list mode {State}.", config.MinimalMode ? "enabled" : "disabled");
+            config.Save();
+        }
+
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        var active = ImGui.IsItemActive();
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var icon = (config.MinimalMode ? FontAwesomeIcon.ExpandAlt : FontAwesomeIcon.CompressAlt).ToIconString();
+            var fontSize = 13.8f * scale;
+            var iconSize = ImGui.CalcTextSize(icon) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            var color = config.MinimalMode || hovered || active ? config.AccentColor : Alpha(UiColors.TextDim, 0.76f);
+            drawList.AddText(UiBuilder.IconFont, fontSize, pos + (size - iconSize) * 0.5f, Color(color), icon);
+        }
+
+        if (hovered)
+            ImGui.SetTooltip(config.MinimalMode ? "Disable minimal contact list mode" : "Enable minimal contact list mode");
+    }
+
+    private void HandleHiddenHeaderWindowDrag(Vector2 headerStart, float width, float height)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var mouse = ImGui.GetMousePos();
+        var min = headerStart;
+        var max = headerStart + new Vector2(width - 104f * scale, height);
+
+        if (mouse.X >= min.X && mouse.X <= max.X && mouse.Y >= min.Y && mouse.Y <= max.Y && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+            draggingWindowFromSummary = true;
+
+        if (!ImGui.IsMouseDown(ImGuiMouseButton.Left))
+        {
+            draggingWindowFromSummary = false;
+            return;
+        }
+
+        if (!draggingWindowFromSummary)
+            return;
+
+        var delta = ImGui.GetIO().MouseDelta;
+        if (delta.X != 0f || delta.Y != 0f)
+            ImGui.SetWindowPos(ImGui.GetWindowPos() + delta);
+    }
+
+    private void DrawHeaderWindowControls(Vector2 headerStart, float width, float height)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var size = new Vector2(24f, 24f) * scale;
+        var minimalPos = headerStart + new Vector2(width - size.X - 12f * scale, (height - size.Y) * 0.5f);
+        var profilePos = minimalPos - new Vector2(size.X + 5f * scale, 0f);
+        var loginPos = profilePos - new Vector2(size.X + 5f * scale, 0f);
+        var collapsePos = loginPos - new Vector2(size.X + 5f * scale, 0f);
+        var closePos = collapsePos - new Vector2(size.X + 5f * scale, 0f);
+
+        DrawHeaderWindowButton(drawList, closePos, size, "X", UiColors.Busy, "Close Privacy", () => IsOpen = false);
+        DrawHeaderWindowButton(drawList, collapsePos, size, config.WindowCollapsed ? "+" : "-", config.AccentColor, config.WindowCollapsed ? "Expand Privacy" : "Collapse Privacy", () =>
+        {
+            config.WindowCollapsed = !config.WindowCollapsed;
+            config.Save();
+        });
+    }
+
+    private void DrawHeaderWindowButton(ImDrawListPtr drawList, Vector2 pos, Vector2 size, string text, Vector4 hoverColor, string tooltip, Action click)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        ImGui.SetCursorScreenPos(pos);
+        if (ImGui.InvisibleButton($"header-window-button-{tooltip}", size))
+            click();
+
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        var fill = hovered ? Alpha(hoverColor, 0.24f) : Alpha(UiColors.Get("ButtonDefault"), 0.18f);
+        drawList.AddRectFilled(pos, pos + size, Color(fill), 4f * scale);
+        drawList.AddRect(pos, pos + size, Color(Alpha(hovered ? hoverColor : UiColors.TextDim, hovered ? 0.58f : 0.22f)), 4f * scale, ImDrawFlags.None, 1f * scale);
+
+        var fontSize = 12.8f * scale;
+        var textSize = ImGui.CalcTextSize(text) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+        DrawTextWithShadow(drawList, pos + (size - textSize) * 0.5f, Color(hovered ? hoverColor : UiColors.TextDim), text, fontSize);
+
+        if (hovered)
+            ImGui.SetTooltip(tooltip);
+    }
+
+    private void DrawMainControls(float availableWidth)
+    {
+        var style = ImGui.GetStyle();
+        var scale = ImGuiHelpers.GlobalScale;
+        var paddingX = MathF.Max(style.FramePadding.X, ImGui.GetFontSize() * 0.55f);
+        using var framePadding = ImRaii.PushStyle(ImGuiStyleVar.FramePadding, new Vector2(paddingX, style.FramePadding.Y + 2f * scale));
+
+        var clearButtonSize = CalcIconTextButtonSize(FontAwesomeIcon.Ban, "Clear");
+        var filterButtonSize = config.ActiveView == 3 ? new Vector2(ImGui.GetFrameHeight(), ImGui.GetFrameHeight()) : Vector2.Zero;
+        var frameHeight = ImGui.GetFrameHeight();
+        var filterSpacing = config.ActiveView == 3 ? style.ItemSpacing.X : 0f;
+        var inputWidth = MathF.Max(1f, availableWidth - clearButtonSize.X - style.ItemSpacing.X - filterButtonSize.X - filterSpacing);
+        var inputRectMin = ImGui.GetCursorScreenPos();
+        DrawFilterControlPattern(inputRectMin, new Vector2(inputWidth, frameHeight));
+
+        var searchText = GetActiveSearchText();
+        using (ImRaii.PushColor(ImGuiCol.FrameBg, Vector4.Zero))
+        using (ImRaii.PushColor(ImGuiCol.FrameBgHovered, Vector4.Zero))
+        using (ImRaii.PushColor(ImGuiCol.FrameBgActive, Vector4.Zero))
+        {
+            ImGui.SetNextItemWidth(inputWidth);
+            if (ImGui.InputTextWithHint("##filter", "Search by names..", ref searchText, 255))
+            {
+                SetActiveSearchText(searchText);
+                config.Save();
+            }
+        }
+
+        RegisterFilterControlBorder(ImGui.GetItemRectMin(), ImGui.GetItemRectMax(), ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem), ImGui.IsItemActive());
+
+        if (config.ActiveView == 3)
+        {
+            ImGui.SameLine();
+            DrawDiscoverFilterButton(filterButtonSize);
+        }
+
+        ImGui.SameLine();
+        var disableClear = string.IsNullOrEmpty(GetActiveSearchText());
+        using var disabled = ImRaii.Disabled(disableClear);
+        var buttonRectMin = ImGui.GetCursorScreenPos();
+        DrawFilterControlPattern(buttonRectMin, clearButtonSize);
+        using (ImRaii.PushColor(ImGuiCol.Button, Vector4.Zero))
+        using (ImRaii.PushColor(ImGuiCol.ButtonHovered, Vector4.Zero))
+        using (ImRaii.PushColor(ImGuiCol.ButtonActive, Vector4.Zero))
+        {
+            if (IconTextButton(FontAwesomeIcon.Ban, "Clear", clearButtonSize))
+            {
+                SetActiveSearchText(string.Empty);
+                config.Save();
+            }
+        }
+        RegisterFilterControlBorder(ImGui.GetItemRectMin(), ImGui.GetItemRectMax(), !disableClear && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem), !disableClear && ImGui.IsItemActive(), !disableClear);
+    }
+
+    private void DrawDiscoverFilterButton(Vector2 size)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        var pos = ImGui.GetCursorScreenPos();
+        DrawFilterControlPattern(pos, size);
+        using (ImRaii.PushColor(ImGuiCol.Button, Vector4.Zero))
+        using (ImRaii.PushColor(ImGuiCol.ButtonHovered, Vector4.Zero))
+        using (ImRaii.PushColor(ImGuiCol.ButtonActive, Vector4.Zero))
+        {
+            if (IconOnlyButton(FontAwesomeIcon.Filter, "Discover filter", size))
+                ImGui.OpenPopup("discover-filter-popup");
+        }
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        RegisterFilterControlBorder(ImGui.GetItemRectMin(), ImGui.GetItemRectMax(), hovered, ImGui.IsItemActive());
+        if (hovered)
+            ImGui.SetTooltip("Filter friends");
+
+        DrawDiscoverFilterPopup();
+    }
+
+    private void DrawDiscoverFilterPopup()
+    {
+        if (!ImGui.BeginPopup("discover-filter-popup"))
+            return;
+
+        using (ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(8f, 7f) * ImGuiHelpers.GlobalScale))
+        using (ImRaii.PushColor(ImGuiCol.PopupBg, UiColors.Get("PrivatePopupBg")))
+        using (ImRaii.PushColor(ImGuiCol.HeaderHovered, Alpha(config.AccentColor, 0.18f)))
+        using (ImRaii.PushColor(ImGuiCol.HeaderActive, Alpha(config.AccentColor, 0.26f)))
+        {
+            DrawDiscoverFilterMenuItem("Default", 0);
+            DrawDiscoverFilterMenuItem("Online", 1);
+            DrawDiscoverFilterMenuItem("Offline", 2);
+            DrawDiscoverFilterMenuItem("Not on List", 3);
+        }
+
+        ImGui.EndPopup();
+    }
+
+    private void DrawDiscoverFilterMenuItem(string label, int mode)
+    {
+        var selected = config.DiscoverFilterMode == mode;
+        if (ImGui.MenuItem(label, string.Empty, selected))
+        {
+            config.DiscoverFilterMode = mode;
+            config.Save();
+        }
+    }
+
+    private void DrawPairs()
+    {
+        manualDragRows.Clear();
+        var ySize = MathF.Max(1f, ImGui.GetContentRegionAvail().Y);
+
+        using (ImRaii.PushStyle(ImGuiStyleVar.ChildRounding, 2f * ImGuiHelpers.GlobalScale))
+        using (var list = ImRaii.Child("list", new Vector2(windowContentWidth, ySize), border: false))
+        {
+            if (!list)
+                return;
+
+            if (config.ActiveView == 3)
+            {
+                DrawDiscoverFriendList();
+                return;
+            }
+
+            if (config.ActiveView == 4)
+            {
+                DrawGroupsView();
+                return;
+            }
+
+            if (config.ActiveView == 2)
+            {
+                DrawVenuesView();
+                return;
+            }
+
+            var showFavoritesOnly = config.ActiveView == 1;
+            var contacts = GetFilteredContacts()
+                .Where(c => !showFavoritesOnly || c.Favorite)
+                .ToList();
+
+            if (contacts.Count == 0)
+            {
+                ImGui.AlignTextToFramePadding();
+                using (ImRaii.PushStyle(ImGuiStyleVar.Alpha, 0.75f))
+                    ImGui.TextUnformatted(showFavoritesOnly ? "No favorites found." : "No contacts found.");
+                return;
+            }
+
+            for (var i = 0; i < contacts.Count; i++)
+                DrawContactRow(contacts[i], false, false, i);
+
+            DrawManualDropPreview();
+            ClearManualDragIfReleased();
+        }
+    }
+
+    private List<PrivateContact> GetFilteredContacts()
+    {
+        return config.Contacts
+            .Where(c => config.ShowOfflineContacts || c.Status != ContactStatus.Offline)
+            .Where(c => string.IsNullOrWhiteSpace(GetActiveSearchText()) || c.Name.Contains(GetActiveSearchText(), StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    private void DrawDiscoverFriendList()
+    {
+        friendListService.Refresh();
+        var friends = friendListService.Friends
+            .Where(f => string.IsNullOrWhiteSpace(GetActiveSearchText()) || f.Name.Contains(GetActiveSearchText(), StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        friends = config.DiscoverFilterMode switch
+        {
+            1 => friends.OrderByDescending(f => f.Status == ContactStatus.Online || f.Status == ContactStatus.Busy).ThenBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList(),
+            2 => friends.OrderByDescending(f => f.Status == ContactStatus.Offline).ThenBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList(),
+            3 => friends.OrderBy(f => listService.FindExistingContact(f.Name, f.World, f.ContentId) != null).ThenBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList(),
+            _ => friends.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList(),
+        };
+
+        if (friends.Count == 0)
+        {
+            ImGui.AlignTextToFramePadding();
+            using (ImRaii.PushStyle(ImGuiStyleVar.Alpha, 0.75f))
+                ImGui.TextUnformatted("No native friends loaded. Open the game's Friend List once, then return here.");
+            return;
+        }
+
+        DrawDiscoverBulkActions(friends);
+
+        for (var i = 0; i < friends.Count; i++)
+            DrawDiscoverFriendRow(friends[i], i);
+    }
+
+    private void DrawDiscoverBulkActions(IReadOnlyList<FriendSnapshot> friends)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var pos = ImGui.GetCursorScreenPos();
+        var width = MathF.Max(1f, windowContentWidth - ImGui.GetCursorPosX());
+        var height = 30f * scale;
+        var rounding = 4f * scale;
+
+        drawList.AddRectFilled(pos, pos + new Vector2(width, height), Color(Alpha(config.AccentColor, 0.045f)), rounding);
+
+        var buttonSize = new Vector2((width - 10f * scale) / 3f, 23f * scale);
+        ImGui.SetCursorScreenPos(pos + new Vector2(4f, 3.5f) * scale);
+        if (ImGui.Button("Add online", buttonSize))
+            AddFriendsToPrivacy(friends.Where(f => f.Status != ContactStatus.Offline));
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Add all online friends currently shown");
+        ImGui.SameLine(0f, 3f * scale);
+        if (ImGui.Button("Add not listed", buttonSize))
+            AddFriendsToPrivacy(friends.Where(f => listService.FindExistingContact(f.Name, f.World, f.ContentId) == null));
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Add all shown friends that are not already on Privacy");
+        ImGui.SameLine(0f, 3f * scale);
+        if (ImGui.Button("Add shown", buttonSize))
+            AddFriendsToPrivacy(friends);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Add every friend currently visible in Discover");
+
+        ImGui.SetCursorScreenPos(pos + new Vector2(0f, height + 4f * scale));
+    }
+
+    private void AddFriendsToPrivacy(IEnumerable<FriendSnapshot> friends)
+    {
+        var added = 0;
+        var updated = 0;
+        foreach (var friend in friends)
+        {
+            var existing = listService.FindExistingContact(friend.Name, friend.World, friend.ContentId);
+            listService.AddFromFriend(friend);
+            if (existing == null) added++; else updated++;
+        }
+
+        log.Information("Privacy: Discover bulk import complete. Added={Added}, Updated={Updated}.", added, updated);
+        config.Save();
+    }
+
+    private void DrawDiscoverFriendRow(FriendSnapshot friend, int rowIndex)
+    {
+        using var id = ImRaii.PushId($"friend-{friend.ContentId}-{friend.FullName}");
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var rowWidth = MathF.Max(1f, windowContentWidth - ImGui.GetCursorPosX());
+        var rowSize = new Vector2(rowWidth, 34f * scale);
+        var rowMin = ImGui.GetCursorScreenPos();
+        var rowMax = rowMin + rowSize;
+        var alreadyAdded = listService.FindExistingContact(friend.Name, friend.World, friend.ContentId) != null;
+        var hovered = ImGui.IsMouseHoveringRect(rowMin, rowMax);
+        var rowColor = alreadyAdded ? Alpha(UiColors.GoldHover, hovered ? 0.22f : 0.13f) : Alpha(config.UserRowBackgroundColor, hovered ? MathF.Min(1f, config.UserRowBackgroundColor.W + 0.12f) : config.UserRowBackgroundColor.W);
+        if (rowIndex >= 0 && rowIndex % 2 == 1)
+            rowColor = Lighten(rowColor, alreadyAdded ? 0.055f : 0.035f);
+
+        if (!config.HideUserRowBackground)
+            drawList.AddRectFilled(rowMin, rowMax, Color(rowColor), 3f * scale);
+
+        var iconPos = rowMin + new Vector2(7f, 8f) * scale;
+        DrawFriendStatusIcon(friend, iconPos, new Vector2(17f, 17f) * scale);
+
+        var buttonSize = new Vector2(25f, 22f) * scale;
+        var buttonPos = rowMax - new Vector2(buttonSize.X + 6f * scale, rowSize.Y - 6f * scale);
+        var nameAreaRight = buttonPos.X - 7f * scale;
+        var namePos = rowMin + new Vector2(30f, 7f) * scale;
+
+        drawList.PushClipRect(namePos - new Vector2(0f, 2f * scale), new Vector2(nameAreaRight, rowMax.Y), true);
+        DrawTextWithShadow(drawList, namePos, Color(alreadyAdded ? UiColors.GoldHover : UiColors.Text), friend.Name, 15.8f * scale);
+        var worldLabel = string.IsNullOrWhiteSpace(friend.World) ? string.Empty : $"@{friend.World}";
+        if (!string.IsNullOrEmpty(worldLabel))
+        {
+            var nameSize = ImGui.CalcTextSize(friend.Name) * (15.8f * scale / MathF.Max(1f, ImGui.GetFontSize()));
+            DrawTextWithShadow(drawList, namePos + new Vector2(nameSize.X + 4f * scale, 2f * scale), Color(UiColors.TextDim), worldLabel, 12.6f * scale);
+        }
+        drawList.PopClipRect();
+
+        ImGui.SetCursorScreenPos(buttonPos);
+        using (ImRaii.Disabled(alreadyAdded))
+        {
+            if (ImGui.Button("+##add_friend", buttonSize))
+                listService.AddFromFriend(friend);
+        }
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip(alreadyAdded ? "Already on privacy" : "Add to Privacy");
+
+        DrawRowDivider(rowMin.X + 4f * scale, rowMax.X - 4f * scale, rowMax.Y - 1f * scale, alreadyAdded ? UiColors.GoldHover : config.AccentColor, alreadyAdded ? 0.30f : 0.22f);
+
+        ImGui.SetCursorScreenPos(rowMin);
+        ImGui.Dummy(rowSize + new Vector2(0f, 3f * scale));
+    }
+
+    private void DrawFriendStatusIcon(FriendSnapshot friend, Vector2 pos, Vector2 size)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        var texture = gameIcons.GetIcon(friend.StatusIconId);
+        if (texture != null)
+        {
+            try
+            {
+                drawList.AddImage(texture.Handle, pos, pos + size);
+                return;
+            }
+            catch (ObjectDisposedException)
+            {
+                gameIcons.Remove(friend.StatusIconId);
+            }
+        }
+
+        var color = friend.Status switch
+        {
+            ContactStatus.Busy => UiColors.Busy,
+            ContactStatus.Online => UiColors.Online,
+            _ => UiColors.Offline,
+        };
+        drawList.AddCircleFilled(pos + size * 0.5f, size.X * 0.28f, Color(color), 18);
+    }
+
+
+    private void DrawVenuesView()
+    {
+        DrawVenueCreator();
+
+        var search = GetActiveSearchText();
+        var venues = config.Venues
+            .Where(v => string.IsNullOrWhiteSpace(search) || v.Name.Contains(search, StringComparison.OrdinalIgnoreCase) || v.Tag.Contains(search, StringComparison.OrdinalIgnoreCase) || v.LastKnownZone.Contains(search, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (venues.Count == 0)
+        {
+            ImGui.AlignTextToFramePadding();
+            using (ImRaii.PushStyle(ImGuiStyleVar.Alpha, 0.75f))
+                ImGui.TextUnformatted("No venues created yet.");
+            DrawVenueDeferredPopups();
+            return;
+        }
+
+        foreach (var venue in venues.ToList())
+            DrawVenueRow(venue);
+
+        DrawManualDropPreview();
+        ClearManualDragIfReleased();
+        DrawVenueDeferredPopups();
+    }
+
+    private void DrawVenueCreator()
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var start = ImGui.GetCursorScreenPos();
+        var width = MathF.Max(1f, windowContentWidth - ImGui.GetCursorPosX());
+        var height = 32f * scale;
+        var size = new Vector2(width, height);
+        var rounding = 4f * scale;
+
+        drawList.AddRectFilled(start, start + size, Color(Alpha(config.AccentColor, 0.055f)), rounding);
+        drawList.AddRect(start, start + size, Color(Alpha(config.AccentColor, 0.34f)), rounding, ImDrawFlags.None, scale);
+
+        var pad = 6f * scale;
+        var colorSize = new Vector2(24f, 24f) * scale;
+        var plusSize = new Vector2(30f, 24f) * scale;
+        var spacing = 5f * scale;
+        var inputWidth = MathF.Max(70f * scale, width - pad * 2f - colorSize.X - plusSize.X - spacing * 2f);
+
+        ImGui.SetCursorScreenPos(start + new Vector2(pad, 4f * scale));
+        ImGui.SetNextItemWidth(inputWidth);
+        using (ImRaii.PushColor(ImGuiCol.Border, Alpha(config.AccentColor, 0.62f)))
+        using (ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, 1f * scale))
+            ImGui.InputTextWithHint("##new_venue_name", "Venue name", ref newVenueNameBuffer, 80);
+
+        ImGui.SameLine(0f, spacing);
+        DrawColorSquare("new_venue_color", ref venuePickerColor, ref venueColorHexBuffer);
+
+        ImGui.SameLine(0f, spacing);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            if (ImGui.Button(FontAwesomeIcon.Plus.ToIconString() + "##create_venue", plusSize))
+                CreateVenueFromInput();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Create venue");
+
+        ImGui.SetCursorScreenPos(start + new Vector2(0f, height + 5f * scale));
+    }
+
+    private void CreateVenueFromInput()
+    {
+        var name = newVenueNameBuffer.Trim();
+        if (string.IsNullOrWhiteSpace(name))
+            return;
+
+        var venue = new PrivateContact
+        {
+            Name = name,
+            VenueColorHex = NormalizeHex(venueColorHexBuffer, "#2BE5B5"),
+            LastKnownZone = "Click the message button to edit localization",
+            AddedAt = DateTimeOffset.UtcNow,
+            Status = ContactStatus.Online,
+        };
+
+        config.Venues.Add(venue);
+        newVenueNameBuffer = string.Empty;
+        log.Information("Privacy: created venue {VenueName} with color {Color}.", venue.Name, venue.VenueColorHex);
+        config.Save();
+    }
+
+    private void DrawVenueRow(PrivateContact venue)
+    {
+        using var id = ImRaii.PushId("venue-" + venue.Id);
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var rowWidth = MathF.Max(1f, windowContentWidth - ImGui.GetCursorPosX());
+        var minimalMode = config.MinimalMode;
+        var rowSize = new Vector2(rowWidth, (minimalMode ? 60f : RowHeight) * scale);
+        var rowStart = ImGui.GetCursorScreenPos();
+        var rowEnd = rowStart + rowSize;
+        var venueColor = UiColors.HexToRgba(NormalizeHex(venue.VenueColorHex, "#2BE5B5"));
+
+        using (ImRaii.PushColor(ImGuiCol.ChildBg, Vector4.Zero))
+        using (var row = ImRaii.Child("venue-row", rowSize, false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse))
+        {
+            if (!row)
+                return;
+
+            var localMin = ImGui.GetWindowPos();
+            var localMax = localMin + ImGui.GetWindowSize();
+            var hovered = ImGui.IsMouseHoveringRect(localMin, localMax);
+            var rounding = 3f * scale;
+
+            if (!config.HideVenuesRowBackground)
+                drawList.AddRectFilled(localMin, localMax, Color(Alpha(venueColor, hovered ? 0.34f : 0.24f)), rounding);
+            HandleManualRowDrag(
+                "venue",
+                venue.Id,
+                null,
+                localMin,
+                localMax,
+                -1,
+                venueColor,
+                string.IsNullOrWhiteSpace(venue.Nickname) ? venue.Name : venue.Nickname,
+                string.IsNullOrWhiteSpace(venue.LastKnownZone) ? "No localization set." : venue.LastKnownZone);
+
+            var portraitBaseSize = minimalMode ? 38f : PortraitSize;
+            var portraitSize = new Vector2(portraitBaseSize * scale);
+            var portraitPos = localMin + new Vector2(6f, minimalMode ? 6f : 8f) * scale;
+            ImGui.SetCursorScreenPos(portraitPos);
+            DrawVenueProfileSquare(venue, portraitSize, venueColor);
+
+            var textLeft = localMin.X + (portraitBaseSize + 14f) * scale;
+            var textRight = localMax.X - 7f * scale;
+            var textWidth = textRight - textLeft;
+
+            DrawVenueTexts(venue, new Vector2(textLeft, localMin.Y + 7f * scale), textWidth, venueColor);
+            if (!minimalMode)
+                DrawVenueActionButtons(venue, new Vector2(textLeft, localMin.Y + 50f * scale), textWidth);
+
+            if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+                ImGui.OpenPopup("venue-context");
+
+            DrawVenueContextPopup(venue);
+        }
+
+        DrawRowDivider(rowStart.X + 6f * scale, rowEnd.X - 6f * scale, rowEnd.Y - 1f * scale, venueColor, 0.52f);
+    }
+
+    private void DrawVenueTexts(PrivateContact venue, Vector2 pos, float width, Vector4 venueColor)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var nameFontSize = 18.0f * scale;
+        var tagFontSize = 14.2f * scale;
+        var safeWidth = MathF.Max(40f * scale, width);
+        var iconReserve = 36f * scale;
+        var gap = 5f * scale;
+
+        var name = string.IsNullOrWhiteSpace(venue.Nickname) ? venue.Name : venue.Nickname;
+        var symbolText = (venue.ContactSymbol ?? string.Empty).Trim();
+        var hasSymbol = !string.IsNullOrWhiteSpace(symbolText);
+        var symbolWidth = hasSymbol ? ImGui.CalcTextSize(symbolText).X * (nameFontSize / MathF.Max(1f, ImGui.GetFontSize())) + gap : 0f;
+
+        var tagText = (venue.Tag ?? string.Empty).Trim();
+        var hasTag = !string.IsNullOrWhiteSpace(tagText);
+        var tagSize = hasTag ? ImGui.CalcTextSize(tagText) * (tagFontSize / MathF.Max(1f, ImGui.GetFontSize())) : Vector2.Zero;
+        var maxTagWidth = hasTag ? MathF.Min(tagSize.X, MathF.Max(26f * scale, safeWidth * 0.28f)) : 0f;
+        var nameSize = ImGui.CalcTextSize(name) * (nameFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+        var visibleNameWidth = MathF.Min(nameSize.X, MathF.Max(24f * scale, safeWidth - iconReserve - maxTagWidth - gap - symbolWidth));
+
+        var nameStart = pos;
+        if (hasSymbol)
+        {
+            DrawTextWithShadow(drawList, nameStart, Color(ResolveSymbolColor(venue)), symbolText, nameFontSize);
+            nameStart.X += symbolWidth;
+        }
+
+        drawList.PushClipRect(nameStart - new Vector2(0f, 2f * scale), new Vector2(nameStart.X + visibleNameWidth, nameStart.Y + 23f * scale), true);
+        DrawTextWithShadow(drawList, nameStart, Color(UiColors.Text), name, nameFontSize);
+        drawList.PopClipRect();
+
+        ImGui.SetCursorScreenPos(pos);
+        ImGui.InvisibleButton("venue-name-hover", new Vector2(symbolWidth + visibleNameWidth, 22f * scale));
+        var tooltip = BuildNameTooltip(venue);
+        if (ImGui.IsItemHovered() && !string.IsNullOrWhiteSpace(tooltip))
+            ImGui.SetTooltip(tooltip);
+
+        var cursorX = nameStart.X + visibleNameWidth + gap;
+        if (hasTag)
+        {
+            var tagPos = new Vector2(cursorX, pos.Y + 2f * scale);
+            var tagColor = ResolveTagColor(venue);
+            drawList.PushClipRect(tagPos - new Vector2(0f, 1f * scale), new Vector2(tagPos.X + maxTagWidth, tagPos.Y + 19f * scale), true);
+            DrawTextWithShadow(drawList, tagPos, Color(tagColor), tagText, tagFontSize);
+            drawList.PopClipRect();
+            cursorX += maxTagWidth + gap;
+        }
+
+        var starPos = new Vector2(MathF.Min(cursorX + 1.5f * scale, pos.X + safeWidth - 16f * scale), pos.Y + 5.8f * scale);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var color = venue.Favorite ? UiColors.Favorite : Alpha(UiColors.TextDim, 0.38f);
+            drawList.AddText(UiBuilder.IconFont, 8.7f * scale, starPos, Color(color), FontAwesomeIcon.Star.ToIconString());
+        }
+
+        ImGui.SetCursorScreenPos(starPos - new Vector2(2f * scale));
+        if (ImGui.InvisibleButton("venue-favorite", new Vector2(13f * scale, 13f * scale)))
+        {
+            venue.Favorite = !venue.Favorite;
+            config.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(venue.Favorite ? "Remove favorite" : "Add favorite");
+
+        var locationPos = pos + new Vector2(0f, 22f * scale);
+        var location = string.IsNullOrWhiteSpace(venue.LastKnownZone) ? "No localization set." : venue.LastKnownZone;
+        drawList.PushClipRect(locationPos - new Vector2(0f, 1f * scale), new Vector2(locationPos.X + safeWidth, locationPos.Y + 17f * scale), true);
+        DrawTextWithShadow(drawList, locationPos, Color(UiColors.TextDim), location, 14.2f * scale);
+        drawList.PopClipRect();
+    }
+
+    private void DrawVenueActionButtons(PrivateContact venue, Vector2 pos, float width)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var spacing = 4f * scale;
+        var buttonHeight = 24f * scale;
+        var fullWidth = MathF.Max(40f * scale, width);
+        var buttonWidth = MathF.Max(30f * scale, (fullWidth - spacing * 3f) / 4f);
+        var x = pos.X;
+
+        DrawActionButton(FontAwesomeIcon.Comment, "Edit localization", UiColors.PurpleHover, new Vector2(buttonWidth, buttonHeight), () => OpenVenueLocationEditor(venue), x, pos.Y);
+        x += buttonWidth + spacing;
+        DrawVenueTeleportButton(venue, new Vector2(x, pos.Y), new Vector2(buttonWidth, buttonHeight));
+        x += buttonWidth + spacing;
+        DrawActionButton(FontAwesomeIcon.Tag, "Tag", config.AccentColor, new Vector2(buttonWidth, buttonHeight), () => OpenTagEditor(venue), x, pos.Y);
+        x += buttonWidth + spacing;
+        DrawActionButton(FontAwesomeIcon.Book, "Notes", UiColors.BrownHover, new Vector2(buttonWidth, buttonHeight), () => notesWindow.Open(venue), x, pos.Y);
+    }
+
+    private void DrawVenueTeleportButton(PrivateContact venue, Vector2 pos, Vector2 size)
+    {
+        ImGui.SetCursorScreenPos(pos);
+        var clicked = ImGui.InvisibleButton("venue-teleport", size);
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        var rightClicked = hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Right);
+        var drawList = ImGui.GetWindowDrawList();
+        var scale = ImGuiHelpers.GlobalScale;
+
+        if (IsCustomMainBackgroundActive())
+            DrawSoftShadowRect(drawList, pos, pos + size, 5f * scale, 0.18f);
+
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var iconText = FontAwesomeIcon.Home.ToIconString();
+            var iconFontSize = 14.9f * scale;
+            var iconSize = ImGui.CalcTextSize(iconText) * (iconFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            drawList.AddText(UiBuilder.IconFont, iconFontSize, pos + (size - iconSize) * 0.5f, Color(hovered ? UiColors.GoldHover : UiColors.Text), iconText);
+        }
+
+        if (clicked)
+            TeleportToVenue(venue);
+        if (rightClicked)
+            OpenVenueTeleportEditor(venue);
+        if (hovered)
+            ImGui.SetTooltip("Teleport to venue\nRight-click to set command");
+    }
+
+    private void DrawVenueProfileSquare(PrivateContact venue, Vector2 size, Vector4 venueColor)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        var min = ImGui.GetCursorScreenPos();
+        var max = min + size;
+        var rounding = 4f * ImGuiHelpers.GlobalScale;
+        var texture = profileImages.GetTexture(venue.ProfileImagePath);
+
+        if (IsCustomMainBackgroundActive())
+            DrawSoftShadowRect(drawList, min, max, rounding, 0.22f);
+
+        if (texture != null)
+        {
+            drawList.AddImageRounded(texture.Handle, min, max, Vector2.Zero, Vector2.One, Color(Vector4.One), rounding);
+            drawList.AddRect(min, max, Color(Alpha(venueColor, 0.34f)), rounding, ImDrawFlags.None, 1f * ImGuiHelpers.GlobalScale);
+        }
+        else
+        {
+            drawList.AddRectFilled(min, max, Color(new Vector4(0.06f, 0.09f, 0.08f, 0.92f)), rounding);
+            drawList.AddRect(min, max, Color(Alpha(venueColor, 0.42f)), rounding, ImDrawFlags.None, 1f * ImGuiHelpers.GlobalScale);
+            using (ImRaii.PushFont(UiBuilder.IconFont))
+            {
+                var icon = FontAwesomeIcon.Home.ToIconString();
+                var iconSize = ImGui.CalcTextSize(icon);
+                drawList.AddText(min + (size - iconSize) * 0.5f, Color(UiColors.TextDim), icon);
+            }
+        }
+
+        ImGui.InvisibleButton("venue-profile-image", size);
+        if (ImGui.IsItemHovered())
+        {
+            DrawGlowRect(drawList, min, max, venueColor, rounding, 0.16f);
+            ImGui.SetTooltip("Click to choose a venue image. Max 512x512 and 2 MB.");
+        }
+
+        if (ImGui.IsItemClicked())
+            OpenImagePicker(venue);
+    }
+
+    private void DrawVenueContextPopup(PrivateContact venue)
+    {
+        if (!ImGui.BeginPopup("venue-context"))
+            return;
+
+        if (ImGui.MenuItem("Remove"))
+        {
+            config.Venues.Remove(venue);
+            log.Information("Privacy: removed venue {VenueName}.", venue.Name);
+            config.Save();
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Quick note"))
+        {
+            OpenQuickNoteEditor(venue);
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Edit color"))
+        {
+            OpenVenueColorEditor(venue);
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Edit localization"))
+        {
+            OpenVenueLocationEditor(venue);
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Teleport to venue"))
+        {
+            TeleportToVenue(venue);
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Edit teleport command"))
+        {
+            OpenVenueTeleportEditor(venue);
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Edit profile"))
+        {
+            contactProfileWindow.Open(venue);
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Tag"))
+        {
+            OpenTagEditor(venue);
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Notes"))
+        {
+            notesWindow.Open(venue);
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.EndPopup();
+    }
+
+    private void OpenVenueLocationEditor(PrivateContact venue)
+    {
+        editingVenueLocation = venue;
+        venueLocationBuffer = venue.LastKnownZone ?? string.Empty;
+        openVenueLocationPopup = true;
+    }
+
+    private void OpenVenueTeleportEditor(PrivateContact venue)
+    {
+        editingVenueTeleport = venue;
+        venueTeleportCommandBuffer = venue.VenueTeleportCommand ?? string.Empty;
+        openVenueTeleportPopup = true;
+    }
+
+    private void OpenVenueColorEditor(PrivateContact venue)
+    {
+        editingVenueColor = venue;
+        venueEditColorHexBuffer = NormalizeHex(venue.VenueColorHex, "#2BE5B5");
+        venueEditPickerColor = UiColors.HexToRgba(venueEditColorHexBuffer);
+        openVenueColorPopup = true;
+    }
+
+    private void TeleportToVenue(PrivateContact venue)
+    {
+        var command = (venue.VenueTeleportCommand ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            OpenVenueTeleportEditor(venue);
+            return;
+        }
+
+        log.Information("Privacy: executing venue teleport for {VenueName}; command={Command}", venue.Name, command);
+        nativeCommands.Execute(command);
+    }
+
+    private void DrawVenueDeferredPopups()
+    {
+        DrawVenueLocationPopup();
+        DrawVenueTeleportPopup();
+        DrawVenueColorPopup();
+    }
+
+    private void DrawVenueLocationPopup()
+    {
+        if (!openVenueLocationPopup)
+            return;
+
+        ImGui.OpenPopup("Edit Venue Localization");
+        var open = true;
+        using var popupWindowBg = ImRaii.PushColor(ImGuiCol.WindowBg, Vector4.Zero);
+        using var popupBg = ImRaii.PushColor(ImGuiCol.PopupBg, Vector4.Zero);
+        using var popupBorder = ImRaii.PushColor(ImGuiCol.Border, Vector4.Zero);
+        using var popupTitleBg = ImRaii.PushColor(ImGuiCol.TitleBg, UiColors.Get("PrivateTitleBg"));
+        using var popupTitleBgActive = ImRaii.PushColor(ImGuiCol.TitleBgActive, UiColors.Get("PrivateTitleBgActive"));
+        using var popupPadding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(8f, 0f) * ImGuiHelpers.GlobalScale);
+        if (ImGui.BeginPopupModal("Edit Venue Localization", ref open, ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoMove))
+        {
+            WindowEdgeFade.DrawUnified(config.WindowBackgroundColor);
+            ImGui.SetNextItemWidth(330f * ImGuiHelpers.GlobalScale);
+            ImGui.InputTextWithHint("##venue_location", "Localization text", ref venueLocationBuffer, 256);
+
+            if (ImGui.Button("Save", new Vector2(90f, 0f) * ImGuiHelpers.GlobalScale))
+            {
+                if (editingVenueLocation != null)
+                {
+                    editingVenueLocation.LastKnownZone = venueLocationBuffer.Trim();
+                    log.Information("Privacy: saved venue localization for {VenueName}: {Localization}", editingVenueLocation.Name, editingVenueLocation.LastKnownZone);
+                    config.Save();
+                }
+                openVenueLocationPopup = false;
+                editingVenueLocation = null;
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new Vector2(90f, 0f) * ImGuiHelpers.GlobalScale))
+            {
+                openVenueLocationPopup = false;
+                editingVenueLocation = null;
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.EndPopup();
+        }
+
+        if (!open)
+        {
+            openVenueLocationPopup = false;
+            editingVenueLocation = null;
+        }
+    }
+
+    private void DrawVenueColorPopup()
+    {
+        if (!openVenueColorPopup)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowSize(new Vector2(310f, 150f) * scale, ImGuiCond.FirstUseEver);
+
+        using var windowBg = ImRaii.PushColor(ImGuiCol.WindowBg, Vector4.Zero);
+        using var border = ImRaii.PushColor(ImGuiCol.Border, Vector4.Zero);
+        using var titleBg = ImRaii.PushColor(ImGuiCol.TitleBg, UiColors.Get("PrivateTitleBg"));
+        using var titleBgActive = ImRaii.PushColor(ImGuiCol.TitleBgActive, UiColors.Get("PrivateTitleBgActive"));
+        using var padding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(8f, 0f) * scale);
+        using var rounding = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 7f * scale);
+
+        var open = true;
+        if (!ImGui.Begin("Edit Venue Color###PrivacyEditVenueColor", ref open, ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoCollapse))
+        {
+            ImGui.End();
+            if (!open)
+                CloseVenueColorEditor();
+            return;
+        }
+
+        WindowEdgeFade.DrawUnified(config.WindowBackgroundColor);
+
+        if (editingVenueColor == null)
+        {
+            ImGui.TextUnformatted("No venue selected.");
+            if (ImGui.Button("Close"))
+                CloseVenueColorEditor();
+
+            ImGui.End();
+            if (!open)
+                CloseVenueColorEditor();
+            return;
+        }
+
+        ImGui.TextColored(config.AccentColor, editingVenueColor.Name);
+        ImGui.TextDisabled("Color used by this venue row.");
+        ImGui.Separator();
+
+        DrawColorSquare("edit_venue_color", ref venueEditPickerColor, ref venueEditColorHexBuffer);
+        ImGui.SameLine();
+        DrawTextWithShadow(ImGui.GetWindowDrawList(), ImGui.GetCursorScreenPos() + new Vector2(0f, 3f * scale), Color(UiColors.TextDim), venueEditColorHexBuffer, 13.2f * scale);
+        ImGui.Dummy(new Vector2(120f, 25f) * scale);
+
+        if (ImGui.Button("Save", new Vector2(90f, 0f) * scale))
+        {
+            editingVenueColor.VenueColorHex = NormalizeHex(venueEditColorHexBuffer, "#2BE5B5");
+            log.Information("Privacy: saved venue color for {VenueName}: {Color}", editingVenueColor.Name, editingVenueColor.VenueColorHex);
+            config.Save();
+            CloseVenueColorEditor();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Cancel", new Vector2(90f, 0f) * scale))
+            CloseVenueColorEditor();
+
+        ImGui.End();
+
+        if (!open)
+            CloseVenueColorEditor();
+    }
+
+    private void CloseVenueColorEditor()
+    {
+        openVenueColorPopup = false;
+        editingVenueColor = null;
+    }
+
+    private void DrawVenueTeleportPopup()
+    {
+        if (!openVenueTeleportPopup)
+            return;
+
+        ImGui.OpenPopup("Venue Teleport Command");
+        var open = true;
+        using var popupWindowBg = ImRaii.PushColor(ImGuiCol.WindowBg, Vector4.Zero);
+        using var popupBg = ImRaii.PushColor(ImGuiCol.PopupBg, Vector4.Zero);
+        using var popupBorder = ImRaii.PushColor(ImGuiCol.Border, Vector4.Zero);
+        using var popupTitleBg = ImRaii.PushColor(ImGuiCol.TitleBg, UiColors.Get("PrivateTitleBg"));
+        using var popupTitleBgActive = ImRaii.PushColor(ImGuiCol.TitleBgActive, UiColors.Get("PrivateTitleBgActive"));
+        using var popupPadding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(8f, 0f) * ImGuiHelpers.GlobalScale);
+        if (ImGui.BeginPopupModal("Venue Teleport Command", ref open, ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoMove))
+        {
+            WindowEdgeFade.DrawUnified(config.WindowBackgroundColor);
+            ImGui.TextDisabled("Command to run when Teleport to venue is clicked.");
+            ImGui.SetNextItemWidth(330f * ImGuiHelpers.GlobalScale);
+            ImGui.InputTextWithHint("##venue_teleport_command", "/li World,Zone or any command", ref venueTeleportCommandBuffer, 256);
+
+            if (ImGui.Button("Save", new Vector2(90f, 0f) * ImGuiHelpers.GlobalScale))
+            {
+                if (editingVenueTeleport != null)
+                {
+                    editingVenueTeleport.VenueTeleportCommand = venueTeleportCommandBuffer.Trim();
+                    log.Information("Privacy: saved venue teleport command for {VenueName}: {Command}", editingVenueTeleport.Name, editingVenueTeleport.VenueTeleportCommand);
+                    config.Save();
+                }
+                openVenueTeleportPopup = false;
+                editingVenueTeleport = null;
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new Vector2(90f, 0f) * ImGuiHelpers.GlobalScale))
+            {
+                openVenueTeleportPopup = false;
+                editingVenueTeleport = null;
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.EndPopup();
+        }
+
+        if (!open)
+        {
+            openVenueTeleportPopup = false;
+            editingVenueTeleport = null;
+        }
+    }
+
+    private void DrawGroupsView()
+    {
+        DrawGroupCreator();
+
+        if (config.Groups.Count == 0)
+        {
+            ImGui.AlignTextToFramePadding();
+            using (ImRaii.PushStyle(ImGuiStyleVar.Alpha, 0.75f))
+                ImGui.TextUnformatted("No groups created yet.");
+            return;
+        }
+
+        foreach (var group in config.Groups.ToList())
+            DrawGroupSection(group);
+    }
+
+    private void DrawGroupCreator()
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var start = ImGui.GetCursorScreenPos();
+        var width = MathF.Max(1f, windowContentWidth - ImGui.GetCursorPosX());
+        var height = 32f * scale;
+        var size = new Vector2(width, height);
+        var rounding = 4f * scale;
+
+        drawList.AddRectFilled(start, start + size, Color(Alpha(config.AccentColor, 0.055f)), rounding);
+        drawList.AddRect(start, start + size, Color(Alpha(config.AccentColor, 0.22f)), rounding, ImDrawFlags.None, scale);
+
+        var pad = 6f * scale;
+        var colorSize = new Vector2(24f, 24f) * scale;
+        var plusSize = new Vector2(30f, 24f) * scale;
+        var spacing = 5f * scale;
+        var inputWidth = MathF.Max(70f * scale, width - pad * 2f - colorSize.X - plusSize.X - spacing * 2f);
+
+        ImGui.SetCursorScreenPos(start + new Vector2(pad, 4f * scale));
+        ImGui.SetNextItemWidth(inputWidth);
+        ImGui.InputTextWithHint("##new_group_name", "Group name", ref newGroupNameBuffer, 64);
+
+        ImGui.SameLine(0f, spacing);
+        DrawColorSquare("new_group_color", ref groupPickerColor, ref groupColorHexBuffer);
+
+        ImGui.SameLine(0f, spacing);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            if (ImGui.Button(FontAwesomeIcon.Plus.ToIconString() + "##create_group", plusSize))
+                CreateGroupFromInput();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Create group");
+
+        ImGui.SetCursorScreenPos(start + new Vector2(0f, height + 5f * scale));
+    }
+
+    private void CreateGroupFromInput()
+    {
+        var name = newGroupNameBuffer.Trim();
+        if (string.IsNullOrWhiteSpace(name))
+            return;
+
+        var newGroup = new PrivateGroup
+        {
+            Name = name,
+            ColorHex = NormalizeHex(groupColorHexBuffer, "#2BE5B5"),
+            Expanded = true,
+        };
+        config.Groups.Add(newGroup);
+        log.Information("Privacy: created group {GroupName} with color {Color}.", newGroup.Name, newGroup.ColorHex);
+        newGroupNameBuffer = string.Empty;
+        config.Save();
+    }
+
+    private void DrawGroupSection(PrivateGroup group)
+    {
+        using var id = ImRaii.PushId(group.Id);
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var width = MathF.Max(1f, windowContentWidth - ImGui.GetCursorPosX());
+        var headerSize = new Vector2(width, 30f * scale);
+        var min = ImGui.GetCursorScreenPos();
+        var max = min + headerSize;
+        var groupColor = UiColors.HexToRgba(NormalizeHex(group.ColorHex, "#FFD56A"));
+
+        drawList.AddRectFilled(min, max, Color(Alpha(groupColor, 0.15f)), 3f * scale);
+
+        var deleteSize = new Vector2(21f, 21f) * scale;
+        var deletePos = new Vector2(max.X - deleteSize.X - 4f * scale, min.Y + (headerSize.Y - deleteSize.Y) * 0.5f);
+        var countText = group.ContactIds.Count.ToString();
+        var countFontSize = 15.2f * scale;
+        var countTextSize = ImGui.CalcTextSize(countText) * (countFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+        var countTextPos = new Vector2(deletePos.X - 18f * scale - countTextSize.X, min.Y + (headerSize.Y - countTextSize.Y) * 0.5f);
+
+        ImGui.SetCursorScreenPos(deletePos);
+        if (ImGui.InvisibleButton("delete-group", deleteSize))
+        {
+            log.Information("Privacy: deleting group {GroupName} with {Count} contacts.", group.Name, group.ContactIds.Count);
+            config.Groups.Remove(group);
+            config.Save();
+            return;
+        }
+        var deleteHovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        drawList.AddRectFilled(deletePos, deletePos + deleteSize, Color(Alpha(deleteHovered ? UiColors.Busy : UiColors.Get("ButtonDefault"), deleteHovered ? 0.30f : 0.16f)), 3f * scale);
+        var deleteText = "X";
+        var deleteFontSize = 12.4f * scale;
+        var deleteTextSize = ImGui.CalcTextSize(deleteText) * (deleteFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+        DrawTextWithShadow(drawList, deletePos + (deleteSize - deleteTextSize) * 0.5f, Color(deleteHovered ? UiColors.Busy : UiColors.TextDim), deleteText, deleteFontSize);
+        if (deleteHovered)
+            ImGui.SetTooltip("Delete group");
+
+        ImGui.SetCursorScreenPos(min);
+        var headerClickableSize = new Vector2(MathF.Max(1f, deletePos.X - min.X - 4f * scale), headerSize.Y);
+        ImGui.InvisibleButton("group-header", headerClickableSize);
+        var afterGroupHeaderCursor = new Vector2(min.X, max.Y);
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Left))
+        {
+            group.Expanded = !group.Expanded;
+            config.Save();
+        }
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
+            ImGui.OpenPopup("group-context");
+
+        var arrow = group.Expanded ? "-" : "+";
+        DrawTextWithShadow(drawList, min + new Vector2(8f, 5.5f) * scale, Color(groupColor), arrow, 17f * scale);
+        DrawTextWithShadow(drawList, min + new Vector2(25f, 4.2f) * scale, Color(UiColors.Text), group.Name, 18.1f * scale);
+        DrawTextWithShadow(drawList, countTextPos, Color(UiColors.TextDim), countText, countFontSize);
+        if (group.EnableStatusNotification)
+        {
+            using (ImRaii.PushFont(UiBuilder.IconFont))
+            {
+                var bell = FontAwesomeIcon.Bell.ToIconString();
+                drawList.AddText(UiBuilder.IconFont, 8.8f * scale, new Vector2(countTextPos.X - 16f * scale, min.Y + 10f * scale), Color(UiColors.Favorite), bell);
+            }
+        }
+
+        ImGui.SetCursorScreenPos(afterGroupHeaderCursor);
+        DrawRowDivider(min.X + 4f * scale, max.X - 4f * scale, max.Y - 1f * scale, groupColor, 0.28f);
+
+        DrawGroupContextPopup(group);
+
+        if (!group.Expanded)
+            return;
+
+        var contacts = group.ContactIds
+            .Select(id => config.Contacts.FirstOrDefault(c => string.Equals(c.Id, id, StringComparison.Ordinal)))
+            .Where(c => c != null)
+            .Cast<PrivateContact>()
+            .Where(c => string.IsNullOrWhiteSpace(GetActiveSearchText()) || c.Name.Contains(GetActiveSearchText(), StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (contacts.Count == 0)
+        {
+            using (ImRaii.PushStyle(ImGuiStyleVar.Alpha, 0.66f))
+            {
+                ImGui.SetCursorPosX(ImGui.GetCursorPosX() + 8f * scale);
+                ImGui.TextUnformatted("No contacts in this group.");
+            }
+            return;
+        }
+
+        for (var i = 0; i < contacts.Count; i++)
+            DrawContactRow(contacts[i], false, true, i, groupColor, group.Id);
+
+        DrawManualDropPreview();
+        ClearManualDragIfReleased();
+    }
+
+    private void DrawGroupContextPopup(PrivateGroup group)
+    {
+        if (!ImGui.BeginPopup("group-context"))
+            return;
+
+        if (ImGui.BeginChild("group-add-list", new Vector2(280f, 170f) * ImGuiHelpers.GlobalScale, true))
+        {
+            foreach (var contact in config.Contacts.OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                var alreadyInGroup = group.ContactIds.Contains(contact.Id, StringComparer.Ordinal);
+                using var disabled = ImRaii.Disabled(alreadyInGroup);
+                if (ImGui.MenuItem($"Add {contact.Name}"))
+                {
+                    AddContactToGroup(contact, group);
+                    ImGui.CloseCurrentPopup();
+                }
+                if (alreadyInGroup && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ImGui.SetTooltip("Already in this group");
+            }
+        }
+        ImGui.EndChild();
+
+        ImGui.Separator();
+        var notifyLabel = group.EnableStatusNotification ? "Disable group notifications" : "Enable group notifications";
+        if (ImGui.MenuItem(notifyLabel))
+        {
+            group.EnableStatusNotification = !group.EnableStatusNotification;
+            log.Information("Privacy: {State} notifications for group {GroupName}.", group.EnableStatusNotification ? "enabled" : "disabled", group.Name);
+            config.Save();
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Remove group"))
+        {
+            log.Information("Privacy: removing group {GroupName} from context menu.", group.Name);
+            config.Groups.Remove(group);
+            config.Save();
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.EndPopup();
+    }
+
+    private void DrawContactRow(PrivateContact contact, bool notebookMode, bool compactGroupsMode, int rowIndex = -1, Vector4? groupRowColor = null, string? groupId = null)
+    {
+        using var id = ImRaii.PushId(contact.Id);
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var rowWidth = MathF.Max(1f, windowContentWidth - ImGui.GetCursorPosX());
+        var minimalMode = config.MinimalMode && !notebookMode && !compactGroupsMode;
+        var rowSize = new Vector2(rowWidth, GetContactRowHeight(notebookMode, compactGroupsMode) * scale);
+        var rowStart = ImGui.GetCursorScreenPos();
+        var rowEnd = rowStart + rowSize;
+
+        using (ImRaii.PushColor(ImGuiCol.ChildBg, Vector4.Zero))
+        using (var row = ImRaii.Child("contact-row", rowSize, false, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse))
+        {
+            if (!row)
+                return;
+
+            var localMin = ImGui.GetWindowPos();
+            var localMax = localMin + ImGui.GetWindowSize();
+            var hovered = ImGui.IsMouseHoveringRect(localMin, localMax);
+            var rounding = 3f * scale;
+
+            var rowColor = GetContactRowColor(contact, hovered, compactGroupsMode, rowIndex, groupRowColor);
+            if (!config.HideUserRowBackground)
+                drawList.AddRectFilled(localMin, localMax, Color(rowColor), rounding);
+            HandleManualRowDrag(
+                compactGroupsMode ? "group" : "contact",
+                contact.Id,
+                compactGroupsMode ? groupId : null,
+                localMin,
+                localMax,
+                rowIndex,
+                compactGroupsMode ? groupRowColor : null,
+                contact.DisplayName,
+                FormatContactLocation(contact));
+
+            var portraitBaseSize = GetPortraitSize(notebookMode, compactGroupsMode);
+            var portraitSize = new Vector2(portraitBaseSize * scale);
+            var portraitPos = localMin + new Vector2(6f, minimalMode ? 6f : 8f) * scale;
+            ImGui.SetCursorScreenPos(portraitPos);
+            DrawProfileSquare(contact, portraitSize);
+
+            var textLeft = localMin.X + (portraitBaseSize + 14f) * scale;
+            var textRight = localMax.X - 7f * scale;
+            var textWidth = textRight - textLeft;
+
+            if (notebookMode)
+            {
+                DrawNotebookContactTexts(contact, new Vector2(textLeft, localMin.Y + 7f * scale), textWidth);
+            }
+            else
+            {
+                DrawContactTexts(contact, new Vector2(textLeft, localMin.Y + 7f * scale), textWidth);
+                if (!compactGroupsMode && !minimalMode && !contact.HasSoftWarning)
+                {
+                    var actionY = !string.IsNullOrWhiteSpace(contact.CloudStatusMessage) ? (string.IsNullOrWhiteSpace(contact.ResidentialDetails) ? 62f : 68f) : (string.IsNullOrWhiteSpace(contact.ResidentialDetails) ? 50f : 62f);
+                    DrawContactActionButtons(contact, new Vector2(textLeft, localMin.Y + actionY * scale), textWidth);
+                }
+            }
+
+            if (!config.HideUserRowBackground && contact.Status == ContactStatus.Offline)
+            {
+                drawList.AddRectFilled(localMin, localMax, Color(new Vector4(0f, 0f, 0f, hovered ? 0.18f : 0.28f)), rounding);
+            }
+
+            if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+                ImGui.OpenPopup("contact-context");
+
+            DrawContactContextPopup(contact);
+        }
+
+        DrawRowDivider(rowStart.X + 6f * scale, rowEnd.X - 6f * scale, rowEnd.Y - 1f * scale, compactGroupsMode ? config.AccentColor : config.AccentColor, 0.23f);
+    }
+
+    private float GetContactRowHeight(bool notebookMode, bool compactGroupsMode)
+    {
+        if (notebookMode) return RowHeight;
+        if (compactGroupsMode) return 72f;
+        return config.MinimalMode ? 60f : RowHeight;
+    }
+
+    private float GetPortraitSize(bool notebookMode, bool compactGroupsMode)
+    {
+        if (notebookMode) return PortraitSize;
+        if (compactGroupsMode) return 42f;
+        return config.MinimalMode ? 38f : PortraitSize;
+    }
+
+    private Vector4 GetContactRowColor(PrivateContact contact, bool hovered, bool compactGroupsMode, int rowIndex = -1, Vector4? groupRowColor = null)
+    {
+        Vector4 color;
+
+        if (compactGroupsMode)
+        {
+            var baseColor = groupRowColor ?? config.AccentColor;
+            color = Alpha(baseColor, hovered ? 0.22f : 0.13f);
+        }
+        else
+        {
+            color = Alpha(config.UserRowBackgroundColor, hovered ? MathF.Min(1f, config.UserRowBackgroundColor.W + 0.12f) : config.UserRowBackgroundColor.W);
+
+            if (contact.HasSoftWarning)
+                color = Alpha(UiColors.Busy, hovered ? 0.18f : 0.105f);
+            else if (listService.IsInLocalZone(contact))
+                color = Alpha(config.AccentColor, hovered ? 0.18f : 0.105f);
+            else if (listService.IsInLocalWorld(contact))
+                color = Alpha(UiColors.CyanHover, hovered ? 0.12f : 0.072f);
+        }
+
+        if (rowIndex >= 0 && rowIndex % 2 == 1)
+        {
+            color = Lighten(color, compactGroupsMode ? 0.06f : 0.035f);
+            if (compactGroupsMode)
+                color.W = MathF.Min(1f, color.W + 0.045f);
+        }
+
+        return color;
+    }
+
+    private bool ShouldBlockManualRowDrag()
+        => quickNoteWindowOpen ||
+           unregisteredProfileWindowOpen ||
+           tagEditorWindowOpen ||
+           openVenueLocationPopup ||
+           openVenueTeleportPopup ||
+           openVenueColorPopup ||
+           openMissingLifestreamPopup ||
+           settingsWindow.IsOpen ||
+           estateTeleportWindow.IsOpen ||
+           contactProfileWindow.IsOpen ||
+           loginWindow.IsOpen ||
+           myProfileWindow.IsOpen ||
+           onlineProfileWindow.IsOpen ||
+           notesWindow.IsOpen;
+
+    private void HandleManualRowDrag(
+        string kind,
+        string itemId,
+        string? groupId,
+        Vector2 min,
+        Vector2 max,
+        int rowIndex,
+        Vector4? accentColor,
+        string title,
+        string subtitle)
+    {
+        var accent = accentColor ?? config.AccentColor;
+        var groupKey = groupId ?? string.Empty;
+        manualDragRows.Add(new ManualDragRow
+        {
+            Kind = kind,
+            Id = itemId,
+            GroupId = groupKey,
+            Min = min,
+            Max = max,
+            Accent = accent,
+        });
+
+        var hovered = ImGui.IsMouseHoveringRect(min, max, false);
+        var mouse = ImGui.GetMousePos();
+        var sameDragScope = string.Equals(draggingRowKind, kind, StringComparison.Ordinal) &&
+                            string.Equals(draggingRowGroupId ?? string.Empty, groupKey, StringComparison.Ordinal);
+
+        if (ShouldBlockManualRowDrag())
+        {
+            if (!string.IsNullOrWhiteSpace(draggingRowId))
+                ClearManualDragState();
+            return;
+        }
+
+        if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left) && string.IsNullOrWhiteSpace(draggingRowId))
+        {
+            draggingRowKind = kind;
+            draggingRowId = itemId;
+            draggingRowGroupId = groupKey;
+            draggingRowActive = false;
+            draggingRowMouseStart = mouse;
+            draggingRowMouseOffset = mouse - min;
+            draggingRowSize = max - min;
+            draggingRowTitle = title;
+            draggingRowSubtitle = subtitle;
+            draggingRowAccent = accent;
+        }
+
+        var isSourceRow = sameDragScope && string.Equals(draggingRowId, itemId, StringComparison.Ordinal);
+        if (isSourceRow && ImGui.IsMouseDown(ImGuiMouseButton.Left))
+        {
+            if (!draggingRowActive && (mouse - draggingRowMouseStart).Length() > 4f * ImGuiHelpers.GlobalScale)
+                draggingRowActive = true;
+
+            if (draggingRowActive)
+            {
+                var sourceDrawList = ImGui.GetForegroundDrawList();
+                sourceDrawList.AddRectFilled(min, max, Color(new Vector4(0f, 0f, 0f, 0.32f)), 4f * ImGuiHelpers.GlobalScale);
+                DrawManualDragGhost();
+            }
+        }
+    }
+
+    private void DrawManualDropPreview()
+    {
+        if (!draggingRowActive || string.IsNullOrWhiteSpace(draggingRowId))
+            return;
+
+        if (!TryGetManualDropTarget(out _, out _, out var previewMin, out var previewSize, out var accent))
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetForegroundDrawList();
+        var previewMax = previewMin + previewSize;
+
+        // Whole-row/whole-slot preview only.
+        // No top/bottom border or divider marker is drawn here so the drag target does
+        // not look like it depends on hitting row edges.
+        drawList.AddRectFilled(
+            previewMin + new Vector2(3f, 2f) * scale,
+            previewMax - new Vector2(3f, 2f) * scale,
+            Color(new Vector4(0f, 0f, 0f, 0.30f)),
+            6f * scale);
+
+        drawList.AddRectFilled(
+            previewMin + new Vector2(3f, 2f) * scale,
+            previewMax - new Vector2(3f, 2f) * scale,
+            Color(Alpha(accent, 0.28f)),
+            6f * scale);
+
+        drawList.AddRect(
+            previewMin + new Vector2(3f, 2f) * scale,
+            previewMax - new Vector2(3f, 2f) * scale,
+            Color(Alpha(accent, 0.78f)),
+            6f * scale,
+            ImDrawFlags.None,
+            1.4f * scale);
+
+        var label = "Drop here";
+        var labelSize = 12.8f * scale;
+        var textSize = ImGui.CalcTextSize(label) * (labelSize / MathF.Max(1f, ImGui.GetFontSize()));
+        var labelPos = previewMin + (previewSize - textSize) * 0.5f;
+        DrawTextWithShadow(drawList, labelPos, Color(Alpha(UiColors.TextDim, 0.94f)), label, labelSize);
+    }
+
+    private bool TryGetManualDropTarget(out string targetId, out bool insertAfter, out Vector2 previewMin, out Vector2 previewSize, out Vector4 accent)
+    {
+        targetId = string.Empty;
+        insertAfter = false;
+        previewMin = Vector2.Zero;
+        previewSize = draggingRowSize;
+        accent = draggingRowAccent;
+
+        if (string.IsNullOrWhiteSpace(draggingRowKind) || string.IsNullOrWhiteSpace(draggingRowId))
+            return false;
+
+        var scopeRows = manualDragRows
+            .Where(row => string.Equals(row.Kind, draggingRowKind, StringComparison.Ordinal) &&
+                          string.Equals(row.GroupId, draggingRowGroupId ?? string.Empty, StringComparison.Ordinal))
+            .OrderBy(row => row.Min.Y)
+            .ToList();
+
+        if (scopeRows.Count <= 1)
+            return false;
+
+        var sourceId = draggingRowId;
+        var sourceIndex = scopeRows.FindIndex(row => string.Equals(row.Id, sourceId, StringComparison.Ordinal));
+        if (sourceIndex < 0)
+            return false;
+
+        var mouseY = ImGui.GetMousePos().Y;
+        var rowsWithoutSource = scopeRows
+            .Where(row => !string.Equals(row.Id, sourceId, StringComparison.Ordinal))
+            .ToList();
+
+        if (rowsWithoutSource.Count == 0)
+            return false;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var first = rowsWithoutSource[0];
+        var last = rowsWithoutSource[^1];
+
+        // Whole-row behavior:
+        // - If dragging downward over any part of a lower row, drop after that row.
+        // - If dragging upward over any part of an upper row, drop before that row.
+        // No border/divider hit testing is used here.
+        foreach (var row in rowsWithoutSource)
+        {
+            if (mouseY < row.Min.Y || mouseY > row.Max.Y)
+                continue;
+
+            var targetIndex = scopeRows.FindIndex(r => string.Equals(r.Id, row.Id, StringComparison.Ordinal));
+            if (targetIndex < 0)
+                continue;
+
+            targetId = row.Id;
+            insertAfter = sourceIndex < targetIndex;
+            previewMin = new Vector2(row.Min.X, row.Min.Y);
+            previewSize = new Vector2(row.Max.X - row.Min.X, row.Max.Y - row.Min.Y);
+            accent = row.Accent;
+            return true;
+        }
+
+        if (mouseY < first.Min.Y)
+        {
+            targetId = first.Id;
+            insertAfter = false;
+            previewMin = new Vector2(first.Min.X, first.Min.Y);
+            previewSize = new Vector2(first.Max.X - first.Min.X, first.Max.Y - first.Min.Y);
+            accent = first.Accent;
+            return true;
+        }
+
+        if (mouseY > last.Max.Y)
+        {
+            targetId = last.Id;
+            insertAfter = true;
+            var rowHeight = last.Max.Y - last.Min.Y;
+            previewMin = new Vector2(last.Min.X, last.Max.Y);
+            previewSize = new Vector2(last.Max.X - last.Min.X, rowHeight);
+            accent = last.Accent;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void DrawManualDragGhost()
+    {
+        if (!draggingRowActive || string.IsNullOrWhiteSpace(draggingRowId))
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetForegroundDrawList();
+        var mouse = ImGui.GetMousePos();
+        var min = mouse - draggingRowMouseOffset;
+        var size = draggingRowSize;
+        if (size.X < 40f * scale || size.Y < 20f * scale)
+            return;
+
+        var max = min + size;
+        var rounding = 5f * scale;
+        var accent = draggingRowAccent;
+        var titleSize = 16.2f * scale;
+        var subtitleSize = 12.9f * scale;
+
+        drawList.AddRectFilled(min, max, Color(new Vector4(0.008f, 0.018f, 0.016f, 0.90f)), rounding);
+        drawList.AddRectFilled(min, max, Color(Alpha(accent, 0.22f)), rounding);
+        drawList.AddRect(min, max, Color(Alpha(accent, 0.72f)), rounding, ImDrawFlags.None, 1.2f * scale);
+        drawList.AddLine(new Vector2(min.X + 8f * scale, max.Y - 2f * scale), new Vector2(max.X - 8f * scale, max.Y - 2f * scale), Color(Alpha(accent, 0.55f)), 1.2f * scale);
+
+        var textPos = min + new Vector2(14f, MathF.Max(8f, (size.Y - 40f * scale) * 0.5f)) * scale;
+        DrawTextWithShadow(drawList, textPos, Color(UiColors.Text), draggingRowTitle, titleSize);
+
+        if (!string.IsNullOrWhiteSpace(draggingRowSubtitle))
+        {
+            var subtitlePos = textPos + new Vector2(0f, 20f * scale);
+            drawList.PushClipRect(subtitlePos, new Vector2(max.X - 14f * scale, subtitlePos.Y + 17f * scale), true);
+            DrawTextWithShadow(drawList, subtitlePos, Color(Alpha(UiColors.TextDim, 0.90f)), draggingRowSubtitle, subtitleSize);
+            drawList.PopClipRect();
+        }
+    }
+
+    private void ClearManualDragIfReleased()
+    {
+        if (string.IsNullOrWhiteSpace(draggingRowId))
+            return;
+
+        if (ImGui.IsMouseDown(ImGuiMouseButton.Left))
+            return;
+
+        if (draggingRowActive)
+            FinishManualDrop();
+
+        ClearManualDragState();
+    }
+
+    private void FinishManualDrop()
+    {
+        if (!TryGetManualDropTarget(out var targetId, out var insertAfter, out _, out _, out _))
+            return;
+
+        ReorderManualRow(draggingRowKind!, draggingRowId!, targetId, insertAfter, draggingRowGroupId);
+    }
+
+    private void ClearManualDragState()
+    {
+        draggingRowKind = null;
+        draggingRowId = null;
+        draggingRowGroupId = null;
+        draggingRowActive = false;
+        draggingRowTitle = string.Empty;
+        draggingRowSubtitle = string.Empty;
+        draggingRowSize = Vector2.Zero;
+        draggingRowMouseOffset = Vector2.Zero;
+        draggingRowMouseStart = Vector2.Zero;
+        draggingRowAccent = Vector4.One;
+    }
+
+    private void ReorderManualRow(string kind, string sourceId, string targetId, bool insertAfter, string? groupId)
+    {
+        if (string.Equals(sourceId, targetId, StringComparison.Ordinal))
+            return;
+
+        switch (kind)
+        {
+            case "venue":
+                ReorderContactList(config.Venues, sourceId, targetId, insertAfter);
+                break;
+            case "group":
+                var group = config.Groups.FirstOrDefault(g => string.Equals(g.Id, groupId, StringComparison.Ordinal));
+                if (group != null)
+                    ReorderIdList(group.ContactIds, sourceId, targetId, insertAfter);
+                break;
+            default:
+                ReorderContactList(config.Contacts, sourceId, targetId, insertAfter);
+                break;
+        }
+
+        log.Information("Privacy: reordered {Kind} row {SourceId} {Direction} {TargetId}.", kind, sourceId, insertAfter ? "after" : "before", targetId);
+        config.Save();
+    }
+
+    private static void ReorderContactList(List<PrivateContact> list, string sourceId, string targetId, bool insertAfter)
+    {
+        var sourceIndex = list.FindIndex(c => string.Equals(c.Id, sourceId, StringComparison.Ordinal));
+        var targetIndex = list.FindIndex(c => string.Equals(c.Id, targetId, StringComparison.Ordinal));
+        if (sourceIndex < 0 || targetIndex < 0 || sourceIndex == targetIndex)
+            return;
+
+        var item = list[sourceIndex];
+        list.RemoveAt(sourceIndex);
+        if (sourceIndex < targetIndex)
+            targetIndex--;
+
+        var insertIndex = insertAfter ? targetIndex + 1 : targetIndex;
+        insertIndex = Math.Clamp(insertIndex, 0, list.Count);
+        list.Insert(insertIndex, item);
+    }
+
+    private static void ReorderIdList(List<string> list, string sourceId, string targetId, bool insertAfter)
+    {
+        var sourceIndex = list.FindIndex(id => string.Equals(id, sourceId, StringComparison.Ordinal));
+        var targetIndex = list.FindIndex(id => string.Equals(id, targetId, StringComparison.Ordinal));
+        if (sourceIndex < 0 || targetIndex < 0 || sourceIndex == targetIndex)
+            return;
+
+        var item = list[sourceIndex];
+        list.RemoveAt(sourceIndex);
+        if (sourceIndex < targetIndex)
+            targetIndex--;
+
+        var insertIndex = insertAfter ? targetIndex + 1 : targetIndex;
+        insertIndex = Math.Clamp(insertIndex, 0, list.Count);
+        list.Insert(insertIndex, item);
+    }
+
+    private void DrawContactTexts(PrivateContact contact, Vector2 pos, float width)
+    {
+        DrawContactNameLine(contact, pos, width);
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var safeWidth = MathF.Max(40f * scale, width);
+        var drawList = ImGui.GetWindowDrawList();
+        var hasStatusMessage = !string.IsNullOrWhiteSpace(contact.CloudStatusMessage);
+        var currentY = pos.Y + 22f * scale;
+
+        if (hasStatusMessage)
+        {
+            var statusPos = new Vector2(pos.X, currentY);
+            drawList.PushClipRect(statusPos - new Vector2(0f, 1f * scale), new Vector2(statusPos.X + safeWidth, statusPos.Y + 16f * scale), true);
+            DrawTextWithShadow(drawList, statusPos, Color(Alpha(config.AccentColor, 0.82f)), contact.CloudStatusMessage.Trim(), 12.8f * scale);
+            drawList.PopClipRect();
+            currentY += 15f * scale;
+        }
+
+        var locationPos = new Vector2(pos.X, currentY);
+        drawList.PushClipRect(locationPos - new Vector2(0f, 1f * scale), new Vector2(locationPos.X + safeWidth, locationPos.Y + 17f * scale), true);
+        DrawTextWithShadow(drawList, locationPos, Color(UiColors.TextDim), FormatContactLocation(contact), 14.2f * scale);
+        drawList.PopClipRect();
+
+        if (!config.MinimalMode && !string.IsNullOrWhiteSpace(contact.ResidentialDetails))
+        {
+            var residentialPos = new Vector2(pos.X, currentY + 16f * scale);
+            drawList.PushClipRect(residentialPos - new Vector2(0f, 1f * scale), new Vector2(residentialPos.X + safeWidth, residentialPos.Y + 17f * scale), true);
+            DrawTextWithShadow(drawList, residentialPos, Color(Alpha(UiColors.TextDim, 0.86f)), contact.ResidentialDetails, 13.7f * scale);
+            drawList.PopClipRect();
+        }
+    }
+
+    private void DrawNotebookContactTexts(PrivateContact contact, Vector2 pos, float width)
+    {
+        DrawContactNameLine(contact, pos, width);
+        DrawNotebookNoteLine(contact, pos + new Vector2(0f, 29f * ImGuiHelpers.GlobalScale), width);
+    }
+
+    private void DrawContactNameLine(PrivateContact contact, Vector2 pos, float width)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var nameFontSize = 18.0f * scale;
+        var tagFontSize = 14.2f * scale;
+        var groupFontSize = 13.7f * scale;
+        var safeWidth = MathF.Max(40f * scale, width);
+        var iconReserve = 82f * scale;
+        var gap = 5f * scale;
+        var displayName = contact.DisplayName;
+        var symbolText = (contact.ContactSymbol ?? string.Empty).Trim();
+        var hasSymbol = !string.IsNullOrWhiteSpace(symbolText);
+        var tagText = (contact.Tag ?? string.Empty).Trim();
+        var groupInfo = GetContactGroupLabel(contact);
+        var hasTag = !string.IsNullOrWhiteSpace(tagText);
+        var hasGroup = groupInfo.group != null;
+
+        var tagSize = hasTag ? ImGui.CalcTextSize(tagText) * (tagFontSize / MathF.Max(1f, ImGui.GetFontSize())) : Vector2.Zero;
+        var groupText = hasGroup ? groupInfo.text : string.Empty;
+        var groupSize = hasGroup ? ImGui.CalcTextSize(groupText) * (groupFontSize / MathF.Max(1f, ImGui.GetFontSize())) : Vector2.Zero;
+        var maxTagWidth = hasTag ? MathF.Min(tagSize.X, MathF.Max(26f * scale, safeWidth * 0.26f)) : 0f;
+        var maxGroupWidth = hasGroup ? MathF.Min(groupSize.X, MathF.Max(26f * scale, safeWidth * 0.24f)) : 0f;
+        var symbolWidth = hasSymbol ? ImGui.CalcTextSize(symbolText).X * (nameFontSize / MathF.Max(1f, ImGui.GetFontSize())) + gap : 0f;
+        var afterNameWidth = symbolWidth + (hasTag ? maxTagWidth + gap : 0f) + (hasGroup ? maxGroupWidth + gap : 0f);
+        var nameSize = ImGui.CalcTextSize(displayName) * (nameFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+        var maxNameWidth = MathF.Max(24f * scale, safeWidth - iconReserve - afterNameWidth);
+        var visibleNameWidth = MathF.Min(nameSize.X, maxNameWidth);
+
+        var nameStart = pos;
+        if (hasSymbol)
+        {
+            DrawTextWithShadow(drawList, nameStart, Color(ResolveSymbolColor(contact)), symbolText, nameFontSize);
+            nameStart.X += symbolWidth;
+        }
+
+        drawList.PushClipRect(nameStart - new Vector2(0f, 2f * scale), new Vector2(nameStart.X + visibleNameWidth, nameStart.Y + 23f * scale), true);
+        DrawTextWithShadow(drawList, nameStart, Color(contact.HasSoftWarning ? UiColors.Busy : UiColors.Text), displayName, nameFontSize);
+        drawList.PopClipRect();
+
+        ImGui.SetCursorScreenPos(pos);
+        ImGui.InvisibleButton("name-hover", new Vector2(symbolWidth + visibleNameWidth, 22f * scale));
+        var tooltip = BuildNameTooltip(contact);
+        if (ImGui.IsItemHovered() && !string.IsNullOrWhiteSpace(tooltip))
+            ImGui.SetTooltip(tooltip);
+
+        var cursorX = nameStart.X + visibleNameWidth + gap;
+        if (hasTag)
+        {
+            var tagPos = new Vector2(cursorX, pos.Y + 2f * scale);
+            var tagColor = ResolveTagColor(contact);
+            drawList.PushClipRect(tagPos - new Vector2(0f, 1f * scale), new Vector2(tagPos.X + maxTagWidth, tagPos.Y + 19f * scale), true);
+            DrawTextWithShadow(drawList, tagPos, Color(tagColor), tagText, tagFontSize);
+            drawList.PopClipRect();
+            cursorX += maxTagWidth + gap;
+        }
+
+        if (hasGroup && groupInfo.group != null)
+        {
+            var groupPos = new Vector2(cursorX, pos.Y + 2.3f * scale);
+            var groupColor = UiColors.HexToRgba(NormalizeHex(groupInfo.group.ColorHex, "#FFD56A"));
+            drawList.PushClipRect(groupPos - new Vector2(0f, 1f * scale), new Vector2(groupPos.X + maxGroupWidth, groupPos.Y + 18f * scale), true);
+            DrawTextWithShadow(drawList, groupPos, Color(groupColor), groupText, groupFontSize);
+            drawList.PopClipRect();
+            cursorX += maxGroupWidth + gap;
+        }
+
+        if (contact.HasSoftWarning)
+        {
+            using (ImRaii.PushFont(UiBuilder.IconFont))
+            {
+                var warnIcon = FontAwesomeIcon.ExclamationTriangle.ToIconString();
+                drawList.AddText(UiBuilder.IconFont, 8.8f * scale, new Vector2(cursorX, pos.Y + 5f * scale), Color(UiColors.Busy), warnIcon);
+            }
+            cursorX += 13f * scale;
+        }
+
+        var centerY = pos.Y + 10.6f * scale;
+        var notifySize = new Vector2(20f, 20f) * scale;
+        var targetSize = new Vector2(18f, 18f) * scale;
+        var notifyPos = new Vector2(pos.X + safeWidth - notifySize.X, pos.Y + 0.2f * scale);
+        var targetPos = new Vector2(notifyPos.X - targetSize.X - 4f * scale, pos.Y + 1.2f * scale);
+        var cloudIconSize = new Vector2(18f, 18f) * scale;
+        var cloudIconPos = new Vector2(targetPos.X - cloudIconSize.X - 4f * scale, pos.Y + 1.2f * scale);
+        if (contact.CloudAccountLinked)
+            DrawCloudLinkedIndicator(contact, cloudIconPos, cloudIconSize);
+        DrawTargetContactButton(contact, targetPos, targetSize);
+        DrawStatusNotificationToggle(contact, notifyPos, notifySize);
+
+        var starMaxX = (contact.CloudAccountLinked ? cloudIconPos.X : targetPos.X) - 15f * scale;
+        var starX = MathF.Min(cursorX + 1.5f * scale, starMaxX);
+        var starPos = new Vector2(starX, centerY - 4.8f * scale);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var color = contact.Favorite ? UiColors.Favorite : Alpha(UiColors.TextDim, 0.38f);
+            drawList.AddText(UiBuilder.IconFont, 8.7f * scale, starPos, Color(color), FontAwesomeIcon.Star.ToIconString());
+        }
+
+        ImGui.SetCursorScreenPos(starPos - new Vector2(2f * scale));
+        if (ImGui.InvisibleButton("favorite", new Vector2(13f * scale, 13f * scale)))
+        {
+            contact.Favorite = !contact.Favorite;
+            config.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(contact.Favorite ? "Remove favorite" : "Add favorite");
+    }
+
+
+    private void DrawCloudLinkedIndicator(PrivateContact contact, Vector2 pos, Vector2 size)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+
+        ImGui.SetCursorScreenPos(pos);
+        ImGui.InvisibleButton("cloud-linked-profile", size);
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        var color = hovered ? config.AccentColor : Alpha(UiColors.TextDim, 0.70f);
+
+        if (hovered)
+            drawList.AddCircleFilled(pos + size * 0.5f, size.X * 0.53f, Color(Alpha(config.AccentColor, 0.10f)), 18);
+
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var icon = FontAwesomeIcon.UserCheck.ToIconString();
+            var fontSize = 10.8f * scale;
+            var iconSize = ImGui.CalcTextSize(icon) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            drawList.AddText(UiBuilder.IconFont, fontSize, pos + (size - iconSize) * 0.5f, Color(color), icon);
+        }
+
+        if (hovered)
+            ImGui.SetTooltip("Logged on Privacy");
+    }
+
+    private void DrawTargetContactButton(PrivateContact contact, Vector2 pos, Vector2 size)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+
+        ImGui.SetCursorScreenPos(pos);
+        var clicked = ImGui.InvisibleButton("target-contact", size);
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        var active = ImGui.IsItemActive();
+        var color = hovered || active ? UiColors.CyanHover : Alpha(UiColors.TextDim, 0.62f);
+
+        if (hovered || active)
+        {
+            drawList.AddCircleFilled(pos + size * 0.5f, size.X * 0.55f, Color(Alpha(UiColors.CyanHover, active ? 0.15f : 0.09f)), 20);
+            drawList.AddCircle(pos + size * 0.5f, size.X * 0.50f, Color(Alpha(UiColors.CyanHover, 0.46f)), 20, 1f * scale);
+        }
+
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var icon = FontAwesomeIcon.Crosshairs.ToIconString();
+            var fontSize = 10.9f * scale;
+            var iconSize = ImGui.CalcTextSize(icon) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            drawList.AddText(UiBuilder.IconFont, fontSize, pos + (size - iconSize) * 0.5f, Color(color), icon);
+        }
+
+        if (clicked)
+        {
+            var targeted = listService.TryTargetContact(contact);
+            log.Information("Privacy: target button clicked for {Name}@{World}; success={Success}.", contact.Name, contact.World, targeted);
+        }
+
+        if (hovered)
+            ImGui.SetTooltip("Target nearby user");
+    }
+
+    private void DrawStatusNotificationToggle(PrivateContact contact, Vector2 pos, Vector2 size)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+
+        ImGui.SetCursorScreenPos(pos);
+        if (ImGui.InvisibleButton("status-notification", size))
+        {
+            contact.EnableStatusNotification = !contact.EnableStatusNotification;
+            log.Information("Privacy: {State} online/offline notifications for {Name}@{World}.",
+                contact.EnableStatusNotification ? "enabled" : "disabled", contact.Name, contact.World);
+            config.Save();
+        }
+
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        var active = ImGui.IsItemActive();
+        var color = contact.EnableStatusNotification
+            ? (hovered || active ? config.AccentColor : UiColors.Favorite)
+            : (hovered || active ? config.AccentColor : Alpha(UiColors.TextDim, 0.42f));
+
+        if (hovered || active || contact.EnableStatusNotification)
+            drawList.AddCircleFilled(pos + size * 0.5f, size.X * 0.53f, Color(Alpha(color, contact.EnableStatusNotification ? 0.13f : 0.08f)), 18);
+
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var icon = FontAwesomeIcon.Bell.ToIconString();
+            var fontSize = 11.2f * scale;
+            var iconSize = ImGui.CalcTextSize(icon) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            drawList.AddText(UiBuilder.IconFont, fontSize, pos + (size - iconSize) * 0.5f, Color(color), icon);
+        }
+
+        if (hovered)
+            ImGui.SetTooltip(contact.EnableStatusNotification ? "Disable Online/Offline notification" : "Enable Online/Offline notification");
+    }
+
+    private string BuildNameTooltip(PrivateContact contact)
+    {
+        var lines = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(contact.Nickname))
+            lines.Add($"Real name: {contact.Name}@{contact.World}");
+
+        if (!string.IsNullOrWhiteSpace(contact.RelationshipStatus))
+            lines.Add($"Private status: {contact.RelationshipStatus}");
+
+        if (contact.LastSeenAt != DateTimeOffset.MinValue)
+            lines.Add($"Last seen: {FormatLastSeen(contact.LastSeenAt)}");
+
+        if (!string.IsNullOrWhiteSpace(contact.MainJob) || !string.IsNullOrWhiteSpace(contact.Role) ||
+            !string.IsNullOrWhiteSpace(contact.Nameday) || !string.IsNullOrWhiteSpace(contact.PreferredContent))
+        {
+            if (!string.IsNullOrWhiteSpace(contact.MainJob)) lines.Add($"Main Job: {contact.MainJob}");
+            if (!string.IsNullOrWhiteSpace(contact.Role)) lines.Add($"Role: {contact.Role}");
+            if (!string.IsNullOrWhiteSpace(contact.Nameday)) lines.Add($"Nameday: {contact.Nameday}");
+            if (!string.IsNullOrWhiteSpace(contact.PreferredContent)) lines.Add($"Content: {contact.PreferredContent}");
+        }
+
+        var quick = (contact.HoverNote ?? string.Empty).Trim();
+        var note = (contact.Notes ?? string.Empty).Trim();
+        var bio = (contact.ProfileBio ?? string.Empty).Trim();
+
+        if (!string.IsNullOrWhiteSpace(bio)) lines.Add($"Bio:\n{bio}");
+        if (!string.IsNullOrWhiteSpace(quick)) lines.Add(quick);
+        if (!string.IsNullOrWhiteSpace(note) && !string.Equals(quick, note, StringComparison.Ordinal))
+            lines.Add($"Notes:\n{note}");
+
+        return string.Join("\n\n", lines);
+    }
+
+    private static string FormatLastSeen(DateTimeOffset timestamp)
+    {
+        var local = timestamp.ToLocalTime();
+        var delta = DateTimeOffset.Now - local;
+        if (delta.TotalMinutes < 1) return "just now";
+        if (delta.TotalMinutes < 60) return $"{Math.Max(1, (int)delta.TotalMinutes)}m ago";
+        if (delta.TotalHours < 24) return $"{Math.Max(1, (int)delta.TotalHours)}h ago";
+        return local.ToString("MM/dd/yyyy HH:mm");
+    }
+
+    private (PrivateGroup? group, string text) GetContactGroupLabel(PrivateContact contact)
+    {
+        var groups = config.Groups.Where(g => g.ContactIds.Contains(contact.Id, StringComparer.Ordinal)).ToList();
+        if (groups.Count == 0) return (null, string.Empty);
+        var first = groups[0];
+        return (first, groups.Count == 1 ? first.Name : $"{first.Name}+{groups.Count - 1}");
+    }
+
+    private void DrawNotebookNoteLine(PrivateContact contact, Vector2 pos, float width)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var buttonSize = new Vector2(22f, 20f) * scale;
+        var spacing = 4f * scale;
+        var noteWidth = MathF.Max(40f * scale, width - buttonSize.X - spacing);
+        var preview = string.IsNullOrWhiteSpace(contact.Notes) ? "No notes yet." : contact.Notes.Replace("\r", " ").Replace("\n", " ");
+        var isEditing = editingNotesContactId == contact.Id;
+
+        if (isEditing)
+        {
+            ImGui.SetCursorScreenPos(pos);
+            ImGui.SetNextItemWidth(noteWidth);
+            if (focusInlineNotesContactId == contact.Id)
+            {
+                ImGui.SetKeyboardFocusHere();
+                focusInlineNotesContactId = null;
+            }
+
+            var pressedEnter = ImGui.InputText("##inline-note", ref inlineNotesBuffer, 2048, ImGuiInputTextFlags.EnterReturnsTrue);
+            var itemActive = ImGui.IsItemActive();
+            var itemHovered = ImGui.IsItemHovered();
+            if (pressedEnter || (!itemActive && ImGui.IsMouseClicked(ImGuiMouseButton.Left) && !itemHovered))
+                CommitInlineNotebookNote(contact);
+        }
+        else
+        {
+            drawList.PushClipRect(pos - new Vector2(0f, 1f * scale), new Vector2(pos.X + noteWidth, pos.Y + 22f * scale), true);
+            DrawTextWithShadow(drawList, pos, Color(string.IsNullOrWhiteSpace(contact.Notes) ? Alpha(UiColors.TextDim, 0.62f) : UiColors.TextDim), preview, 14.1f * scale);
+            drawList.PopClipRect();
+        }
+
+        var buttonPos = new Vector2(pos.X + noteWidth + spacing, pos.Y - 1f * scale);
+        ImGui.SetCursorScreenPos(buttonPos);
+        if (ImGui.InvisibleButton("edit-note", buttonSize))
+            BeginInlineNotebookEdit(contact);
+
+        var min = ImGui.GetItemRectMin();
+        var max = ImGui.GetItemRectMax();
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        var rounding = 4f * scale;
+        drawList.AddRectFilled(min, max, Color(Alpha(UiColors.Get("ButtonDefault"), hovered ? 0.86f : 0.62f)), rounding);
+        drawList.AddRect(min, max, Color(Alpha(hovered ? config.AccentColor : UiColors.TextDim, hovered ? 0.55f : 0.18f)), rounding, ImDrawFlags.None, 1f * scale);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var icon = FontAwesomeIcon.Book.ToIconString();
+            var iconSize = 12.8f * scale;
+            var iconCalc = ImGui.CalcTextSize(icon) * (iconSize / MathF.Max(1f, ImGui.GetFontSize()));
+            drawList.AddText(UiBuilder.IconFont, iconSize, min + ((max - min) - iconCalc) * 0.5f, Color(hovered ? config.AccentColor : UiColors.TextDim), icon);
+        }
+        if (hovered)
+            ImGui.SetTooltip("Edit notebook note");
+    }
+
+    private void BeginInlineNotebookEdit(PrivateContact contact)
+    {
+        editingNotesContactId = contact.Id;
+        inlineNotesBuffer = contact.Notes ?? string.Empty;
+        focusInlineNotesContactId = contact.Id;
+    }
+
+    private void CommitInlineNotebookNote(PrivateContact contact)
+    {
+        contact.Notes = inlineNotesBuffer;
+        log.Information("Privacy: saved inline notebook note for {Name}@{World}; length={Length}.", contact.Name, contact.World, inlineNotesBuffer.Length);
+        editingNotesContactId = null;
+        inlineNotesBuffer = string.Empty;
+        focusInlineNotesContactId = null;
+        editingVenueLocation = null;
+        editingVenueTeleport = null;
+        openVenueLocationPopup = false;
+        openVenueTeleportPopup = false;
+        openVenueColorPopup = false;
+        editingVenueColor = null;
+        config.Save();
+    }
+
+    private void DrawContactActionButtons(PrivateContact contact, Vector2 pos, float width)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var spacing = 3f * scale;
+        var buttonHeight = 24f * scale;
+        var fullWidth = MathF.Max(40f * scale, width);
+        var buttonWidth = MathF.Max(26f * scale, (fullWidth - spacing * 5f) / 6f);
+        var x = pos.X;
+
+        DrawActionButton(FontAwesomeIcon.Comment, "Tell", UiColors.PurpleHover, new Vector2(buttonWidth, buttonHeight), () => SendTell(contact), x, pos.Y);
+        x += buttonWidth + spacing;
+        DrawActionButton(FontAwesomeIcon.Users, "Party", UiColors.CyanHover, new Vector2(buttonWidth, buttonHeight), () => InviteParty(contact), x, pos.Y);
+        x += buttonWidth + spacing;
+        DrawActionButton(FontAwesomeIcon.Compass, "Teleport to user", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => TravelTo(contact), x, pos.Y);
+        x += buttonWidth + spacing;
+        DrawActionButton(FontAwesomeIcon.Home, "Estate Teleportation", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => estateTeleportWindow.Open(contact), x, pos.Y);
+        x += buttonWidth + spacing;
+        DrawActionButton(FontAwesomeIcon.Tag, "Tag", config.AccentColor, new Vector2(buttonWidth, buttonHeight), () => OpenTagEditor(contact), x, pos.Y);
+        x += buttonWidth + spacing;
+        DrawActionButton(FontAwesomeIcon.Book, "Notes", UiColors.BrownHover, new Vector2(buttonWidth, buttonHeight), () => notesWindow.Open(contact), x, pos.Y);
+    }
+
+    private void DrawActionButton(FontAwesomeIcon icon, string tooltip, Vector4 hoverColor, Vector2 size, Action click, float x, float y)
+    {
+        ImGui.SetCursorScreenPos(new Vector2(x, y));
+        var drawList = ImGui.GetWindowDrawList();
+        var scale = ImGuiHelpers.GlobalScale;
+        var clicked = ImGui.InvisibleButton(tooltip, size);
+        var min = ImGui.GetItemRectMin();
+        var max = ImGui.GetItemRectMax();
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        var active = ImGui.IsItemActive();
+        var rounding = 5f * scale;
+
+        if (IsCustomMainBackgroundActive())
+            DrawSoftShadowRect(drawList, min, max, rounding, 0.18f);
+
+        // Keep the action hitbox, but draw no button background.
+        // This keeps the Contacts list visually clean while preserving click/hover behavior.
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var iconText = icon.ToIconString();
+            var iconFontSize = 14.9f * scale;
+            var iconSize = ImGui.CalcTextSize(iconText) * (iconFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            var iconPos = min + (size - iconSize) * 0.5f;
+            drawList.AddText(UiBuilder.IconFont, iconFontSize, iconPos, Color(hovered || active ? hoverColor : UiColors.Text), iconText);
+        }
+
+        if (clicked)
+            click();
+        if (hovered)
+            ImGui.SetTooltip(tooltip);
+    }
+
+    private void DrawProfileSquare(PrivateContact contact, Vector2 size)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        var min = ImGui.GetCursorScreenPos();
+        var max = min + size;
+        var rounding = 4f * ImGuiHelpers.GlobalScale;
+        var texture = profileImages.GetTexture(contact.ProfileImagePath);
+
+        if (IsCustomMainBackgroundActive())
+            DrawSoftShadowRect(drawList, min, max, rounding, 0.22f);
+
+        var isOffline = contact.Status == ContactStatus.Offline;
+        if (texture != null)
+        {
+            var tint = isOffline ? new Vector4(0.72f, 0.72f, 0.72f, 0.55f) : Vector4.One;
+            drawList.AddImageRounded(texture.Handle, min, max, Vector2.Zero, Vector2.One, Color(tint), rounding);
+            if (isOffline)
+                drawList.AddRectFilled(min, max, Color(new Vector4(0f, 0f, 0f, 0.18f)), rounding);
+            drawList.AddRect(min, max, Color(Alpha(config.AccentColor, isOffline ? 0.10f : 0.18f)), rounding, ImDrawFlags.None, 1f * ImGuiHelpers.GlobalScale);
+        }
+        else
+        {
+            drawList.AddRectFilled(min, max, Color(new Vector4(0.06f, 0.09f, 0.08f, 0.92f)), rounding);
+            drawList.AddRect(min, max, Color(Alpha(config.AccentColor, 0.32f)), rounding, ImDrawFlags.None, 1f * ImGuiHelpers.GlobalScale);
+            using (ImRaii.PushFont(UiBuilder.IconFont))
+            {
+                var icon = FontAwesomeIcon.User.ToIconString();
+                var iconSize = ImGui.CalcTextSize(icon);
+                drawList.AddText(min + (size - iconSize) * 0.5f, Color(UiColors.TextDim), icon);
+            }
+        }
+
+        DrawProfileStatusOverlay(contact, min, max);
+
+        ImGui.InvisibleButton("profile-image", size);
+        var cloudManaged = contact.CloudAccountLinked && !string.IsNullOrWhiteSpace(contact.CloudAvatarUrl);
+        if (ImGui.IsItemHovered())
+        {
+            DrawGlowRect(drawList, min, max, config.AccentColor, rounding, 0.16f);
+            ImGui.SetTooltip(cloudManaged
+                ? "This profile picture is managed by the user through Privacy."
+                : "Click to choose a profile image. Max 512x512 and 2 MB.");
+        }
+
+        if (ImGui.IsItemClicked() && !cloudManaged)
+            OpenImagePicker(contact);
+    }
+
+    private void DrawProfileStatusOverlay(PrivateContact contact, Vector2 min, Vector2 max)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        var scale = ImGuiHelpers.GlobalScale;
+        var statusColor = contact.Status switch
+        {
+            ContactStatus.Busy => UiColors.Busy,
+            ContactStatus.Online => UiColors.Online,
+            _ => UiColors.Offline,
+        };
+        var center = max - new Vector2(7.5f, 7.5f) * scale;
+        drawList.AddCircleFilled(center, 6.7f * scale, Color(new Vector4(0.010f, 0.018f, 0.015f, 0.96f)), 18);
+        drawList.AddCircleFilled(center, 4.8f * scale, Color(statusColor), 18);
+        drawList.AddCircle(center, 5.4f * scale, Color(Alpha(Vector4.One, 0.20f)), 18, 1f * scale);
+    }
+
+    private void DrawTopSummaryPanel()
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var baseWidth = windowContentWidth;
+        var height = TopSummaryHeight * scale;
+        var drawList = ImGui.GetWindowDrawList();
+        var cursor = ImGui.GetCursorScreenPos();
+        var protrude = 8f * scale;
+        var pos = cursor + new Vector2(-protrude, 0f);
+        var width = baseWidth + protrude * 2f;
+        var size = new Vector2(width, height);
+        var rounding = 5f * scale;
+        topSummaryPanelPos = pos;
+        topSummaryPanelSize = size;
+        hasTopSummaryPanelGeometry = true;
+
+        drawList.PushClipRect(windowClipMin, windowClipMax, false);
+        var borderPad = 1f * scale;
+        var barFill = Alpha(config.WindowBackgroundColor, MathF.Max(0.92f, config.WindowBackgroundColor.W));
+        var barOverlay = config.TopBarBackgroundColor;
+        drawList.AddRectFilled(pos - new Vector2(borderPad, borderPad), pos + size + new Vector2(borderPad, borderPad), Color(barFill), rounding + borderPad);
+        drawList.AddRectFilled(pos, pos + size, Color(barOverlay), rounding);
+        drawList.AddRect(pos, pos + size, Color(Alpha(config.AccentColor, 0.28f)), rounding, ImDrawFlags.None, 1f * scale);
+        drawList.AddLine(pos + new Vector2(3f * scale, height - 1f * scale), pos + new Vector2(width - 3f * scale, height - 1f * scale), Color(Alpha(config.AccentColor, 0.25f)), 1f * scale);
+
+        var closeSize = new Vector2(24f, 22f) * scale;
+        var closePos = new Vector2(pos.X + width - closeSize.X - 6f * scale, pos.Y + (height - closeSize.Y) * 0.5f);
+        var collapsePos = new Vector2(closePos.X - closeSize.X - 5f * scale, closePos.Y);
+        var textClipRight = collapsePos.X - 6f * scale;
+
+        var friendsText = $"{friendListService.FriendCount} Friends";
+        var privateText = $"{config.Contacts.Count} On Privacy";
+        var favoritesText = $"{config.Contacts.Count(c => c.Favorite)} Favorites";
+        var venuesText = $"{config.Venues.Count} Venues added";
+        var textSize = 14.1f * scale;
+        var advanceTextSize = 13.2f * scale;
+        var x = pos.X + 11f * scale;
+        var y = pos.Y + 7.2f * scale;
+
+        drawList.PushClipRect(new Vector2(pos.X, pos.Y), new Vector2(textClipRight, pos.Y + height), true);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+            drawList.AddText(UiBuilder.IconFont, 10.6f * scale, new Vector2(x, y + 2f * scale), Color(new Vector4(0.22f, 0.88f, 0.32f, 1f)), FontAwesomeIcon.Users.ToIconString());
+        x += 16f * scale;
+        DrawTextWithShadow(drawList, new Vector2(x, y), Color(UiColors.TextDim), friendsText, textSize);
+        x += ImGui.CalcTextSize(friendsText).X * (advanceTextSize / MathF.Max(1f, ImGui.GetFontSize())) + 14f * scale;
+
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+            drawList.AddText(UiBuilder.IconFont, 10.2f * scale, new Vector2(x, y + 2f * scale), Color(config.AccentColor), FontAwesomeIcon.UserCheck.ToIconString());
+        x += 15f * scale;
+        DrawTextWithShadow(drawList, new Vector2(x, y), Color(UiColors.TextDim), privateText, textSize);
+        x += ImGui.CalcTextSize(privateText).X * (advanceTextSize / MathF.Max(1f, ImGui.GetFontSize())) + 14f * scale;
+
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+            drawList.AddText(UiBuilder.IconFont, 10.2f * scale, new Vector2(x, y + 2f * scale), Color(UiColors.Favorite), FontAwesomeIcon.Star.ToIconString());
+        x += 14f * scale;
+        DrawTextWithShadow(drawList, new Vector2(x, y), Color(UiColors.TextDim), favoritesText, textSize);
+        x += ImGui.CalcTextSize(favoritesText).X * (advanceTextSize / MathF.Max(1f, ImGui.GetFontSize())) + 14f * scale;
+
+        DrawTextWithShadow(drawList, new Vector2(x, y - 0.5f * scale), Color(config.AccentColor), "\uE03E", textSize);
+        x += ImGui.CalcTextSize("\uE03E").X * (advanceTextSize / MathF.Max(1f, ImGui.GetFontSize())) + 5f * scale;
+        DrawTextWithShadow(drawList, new Vector2(x, y), Color(UiColors.TextDim), venuesText, textSize);
+        drawList.PopClipRect();
+
+        ImGui.SetCursorScreenPos(collapsePos);
+        if (ImGui.InvisibleButton("top-summary-collapse", closeSize))
+        {
+            config.WindowCollapsed = !config.WindowCollapsed;
+            config.Save();
+        }
+        var hoveredCollapse = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        topSummaryPanelCollapseHovered = hoveredCollapse;
+        var collapseFill = hoveredCollapse ? Alpha(config.AccentColor, 0.24f) : Alpha(UiColors.Get("ButtonDefault"), 0.20f);
+        drawList.AddRectFilled(collapsePos, collapsePos + closeSize, Color(collapseFill), 4f * scale);
+        drawList.AddRect(collapsePos, collapsePos + closeSize, Color(Alpha(hoveredCollapse ? config.AccentColor : UiColors.TextDim, hoveredCollapse ? 0.58f : 0.22f)), 4f * scale, ImDrawFlags.None, scale);
+        var collapseText = config.WindowCollapsed ? "+" : "-";
+        var collapseFontSize = 13.2f * scale;
+        var collapseTextSize = ImGui.CalcTextSize(collapseText) * (collapseFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+        DrawTextWithShadow(drawList, collapsePos + (closeSize - collapseTextSize) * 0.5f, Color(hoveredCollapse ? config.AccentColor : UiColors.TextDim), collapseText, collapseFontSize);
+        if (hoveredCollapse)
+            ImGui.SetTooltip(config.WindowCollapsed ? "Expand Privacy" : "Collapse Privacy");
+
+        ImGui.SetCursorScreenPos(closePos);
+        if (ImGui.InvisibleButton("top-summary-close", closeSize))
+            IsOpen = false;
+        var hoveredClose = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        topSummaryPanelCloseHovered = hoveredClose;
+        var closeFill = hoveredClose ? Alpha(UiColors.Busy, 0.25f) : Alpha(UiColors.Get("ButtonDefault"), 0.20f);
+        drawList.AddRectFilled(closePos, closePos + closeSize, Color(closeFill), 4f * scale);
+        drawList.AddRect(closePos, closePos + closeSize, Color(Alpha(hoveredClose ? UiColors.Busy : UiColors.TextDim, hoveredClose ? 0.58f : 0.22f)), 4f * scale, ImDrawFlags.None, scale);
+        var closeText = "X";
+        var closeFontSize = 12.6f * scale;
+        var closeTextSize = ImGui.CalcTextSize(closeText) * (closeFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+        DrawTextWithShadow(drawList, closePos + (closeSize - closeTextSize) * 0.5f, Color(hoveredClose ? UiColors.Busy : UiColors.TextDim), closeText, closeFontSize);
+        if (hoveredClose)
+            ImGui.SetTooltip("Close Privacy");
+
+        HandleTopSummaryWindowDrag(pos, size, collapsePos, closePos, closeSize);
+
+        drawList.PopClipRect();
+        ImGui.SetCursorScreenPos(cursor + new Vector2(0f, height + 1f * scale));
+    }
+
+
+
+    private void HandleTopSummaryWindowDrag(Vector2 pos, Vector2 size, Vector2 collapsePos, Vector2 closePos, Vector2 buttonSize)
+    {
+        var mouse = ImGui.GetMousePos();
+        var hoveringBar = mouse.X >= pos.X && mouse.X <= pos.X + size.X && mouse.Y >= pos.Y && mouse.Y <= pos.Y + size.Y;
+        var hoveringCollapse = mouse.X >= collapsePos.X && mouse.X <= collapsePos.X + buttonSize.X && mouse.Y >= collapsePos.Y && mouse.Y <= collapsePos.Y + buttonSize.Y;
+        var hoveringClose = mouse.X >= closePos.X && mouse.X <= closePos.X + buttonSize.X && mouse.Y >= closePos.Y && mouse.Y <= closePos.Y + buttonSize.Y;
+
+        if (hoveringBar && !hoveringCollapse && !hoveringClose && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+            draggingWindowFromSummary = true;
+
+        if (!ImGui.IsMouseDown(ImGuiMouseButton.Left))
+        {
+            draggingWindowFromSummary = false;
+            return;
+        }
+
+        if (!draggingWindowFromSummary)
+            return;
+
+        var delta = ImGui.GetIO().MouseDelta;
+        if (delta.X != 0f || delta.Y != 0f)
+            ImGui.SetWindowPos(ImGui.GetWindowPos() + delta);
+    }
+
+    private void RedrawTopSummaryPanelOverlay()
+    {
+        if (!hasTopSummaryPanelGeometry)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var pos = topSummaryPanelPos;
+        var size = topSummaryPanelSize;
+        var height = size.Y;
+        var width = size.X;
+        var rounding = 5f * scale;
+        var closeSize = new Vector2(24f, 22f) * scale;
+        var closePos = new Vector2(pos.X + width - closeSize.X - 6f * scale, pos.Y + (height - closeSize.Y) * 0.5f);
+        var collapsePos = new Vector2(closePos.X - closeSize.X - 5f * scale, closePos.Y);
+        var textClipRight = collapsePos.X - 6f * scale;
+        var borderPad = 1f * scale;
+
+        drawList.PushClipRect(windowClipMin, windowClipMax, false);
+
+        var barFill = Alpha(config.WindowBackgroundColor, MathF.Max(0.92f, config.WindowBackgroundColor.W));
+        var barOverlay = config.TopBarBackgroundColor;
+        drawList.AddRectFilled(pos - new Vector2(borderPad, borderPad), pos + size + new Vector2(borderPad, borderPad), Color(barFill), rounding + borderPad);
+        drawList.AddRectFilled(pos, pos + size, Color(barOverlay), rounding);
+        drawList.AddRect(pos, pos + size, Color(Alpha(config.AccentColor, 0.32f)), rounding, ImDrawFlags.None, 1f * scale);
+        drawList.AddLine(pos + new Vector2(3f * scale, height - 1f * scale), pos + new Vector2(width - 3f * scale, height - 1f * scale), Color(Alpha(config.AccentColor, 0.28f)), 1f * scale);
+
+        var friendsText = $"{friendListService.FriendCount} Friends";
+        var privateText = $"{config.Contacts.Count} On Privacy";
+        var favoritesText = $"{config.Contacts.Count(c => c.Favorite)} Favorites";
+        var venuesText = $"{config.Venues.Count} Venues added";
+        var textSize = 14.1f * scale;
+        var advanceTextSize = 13.2f * scale;
+        var x = pos.X + 11f * scale;
+        var y = pos.Y + 7.2f * scale;
+
+        drawList.PushClipRect(new Vector2(pos.X, pos.Y), new Vector2(textClipRight, pos.Y + height), true);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+            drawList.AddText(UiBuilder.IconFont, 10.6f * scale, new Vector2(x, y + 2f * scale), Color(new Vector4(0.22f, 0.88f, 0.32f, 1f)), FontAwesomeIcon.Users.ToIconString());
+        x += 16f * scale;
+        DrawTextWithShadow(drawList, new Vector2(x, y), Color(UiColors.TextDim), friendsText, textSize);
+        x += ImGui.CalcTextSize(friendsText).X * (advanceTextSize / MathF.Max(1f, ImGui.GetFontSize())) + 14f * scale;
+
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+            drawList.AddText(UiBuilder.IconFont, 10.2f * scale, new Vector2(x, y + 2f * scale), Color(config.AccentColor), FontAwesomeIcon.UserCheck.ToIconString());
+        x += 15f * scale;
+        DrawTextWithShadow(drawList, new Vector2(x, y), Color(UiColors.TextDim), privateText, textSize);
+        x += ImGui.CalcTextSize(privateText).X * (advanceTextSize / MathF.Max(1f, ImGui.GetFontSize())) + 14f * scale;
+
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+            drawList.AddText(UiBuilder.IconFont, 10.2f * scale, new Vector2(x, y + 2f * scale), Color(UiColors.Favorite), FontAwesomeIcon.Star.ToIconString());
+        x += 14f * scale;
+        DrawTextWithShadow(drawList, new Vector2(x, y), Color(UiColors.TextDim), favoritesText, textSize);
+        x += ImGui.CalcTextSize(favoritesText).X * (advanceTextSize / MathF.Max(1f, ImGui.GetFontSize())) + 14f * scale;
+
+        DrawTextWithShadow(drawList, new Vector2(x, y - 0.5f * scale), Color(config.AccentColor), "\uE03E", textSize);
+        x += ImGui.CalcTextSize("\uE03E").X * (advanceTextSize / MathF.Max(1f, ImGui.GetFontSize())) + 5f * scale;
+        DrawTextWithShadow(drawList, new Vector2(x, y), Color(UiColors.TextDim), venuesText, textSize);
+        drawList.PopClipRect();
+
+        var hoveredCollapse = topSummaryPanelCollapseHovered;
+        var collapseFill = hoveredCollapse ? Alpha(config.AccentColor, 0.24f) : Alpha(UiColors.Get("ButtonDefault"), 0.20f);
+        drawList.AddRectFilled(collapsePos, collapsePos + closeSize, Color(collapseFill), 4f * scale);
+        drawList.AddRect(collapsePos, collapsePos + closeSize, Color(Alpha(hoveredCollapse ? config.AccentColor : UiColors.TextDim, hoveredCollapse ? 0.58f : 0.22f)), 4f * scale, ImDrawFlags.None, scale);
+        var collapseText = config.WindowCollapsed ? "+" : "-";
+        var collapseFontSize = 13.2f * scale;
+        var collapseTextSize = ImGui.CalcTextSize(collapseText) * (collapseFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+        DrawTextWithShadow(drawList, collapsePos + (closeSize - collapseTextSize) * 0.5f, Color(hoveredCollapse ? config.AccentColor : UiColors.TextDim), collapseText, collapseFontSize);
+
+        var hoveredClose = topSummaryPanelCloseHovered;
+        var closeFill = hoveredClose ? Alpha(UiColors.Busy, 0.25f) : Alpha(UiColors.Get("ButtonDefault"), 0.20f);
+        drawList.AddRectFilled(closePos, closePos + closeSize, Color(closeFill), 4f * scale);
+        drawList.AddRect(closePos, closePos + closeSize, Color(Alpha(hoveredClose ? UiColors.Busy : UiColors.TextDim, hoveredClose ? 0.58f : 0.22f)), 4f * scale, ImDrawFlags.None, scale);
+        var closeText = "X";
+        var closeFontSize = 12.6f * scale;
+        var closeTextSize = ImGui.CalcTextSize(closeText) * (closeFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+        DrawTextWithShadow(drawList, closePos + (closeSize - closeTextSize) * 0.5f, Color(hoveredClose ? UiColors.Busy : UiColors.TextDim), closeText, closeFontSize);
+
+        drawList.PopClipRect();
+    }
+
+    private void DrawBottomNavigationBar(float availableWidth, float height)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var cursor = ImGui.GetCursorScreenPos();
+        var protrude = 8f * scale;
+        var pos = cursor + new Vector2(-protrude, 0f);
+        var width = availableWidth + protrude * 2f;
+        var size = new Vector2(width, height);
+        var rounding = CompactSidebarRailRounding * scale;
+
+        drawList.PushClipRect(windowClipMin, windowClipMax, false);
+        var borderPad = 1f * scale;
+        var barFill = Alpha(config.WindowBackgroundColor, MathF.Max(0.92f, config.WindowBackgroundColor.W));
+        var barOverlay = config.BottomBarBackgroundColor;
+        drawList.AddRectFilled(pos - new Vector2(borderPad, borderPad), pos + size + new Vector2(borderPad, borderPad), Color(barFill), rounding + borderPad);
+        drawList.AddRectFilled(pos, pos + size, Color(barOverlay), rounding);
+        drawList.AddRect(pos, pos + size, Color(Alpha(config.AccentColor, CompactSidebarRailBorderAlpha)), rounding, ImDrawFlags.None, 1f * scale);
+        sidebarDotRenderer.Draw(drawList, pos, size, Alpha(config.AccentColor, CompactSidebarDotAlpha), 26, 8f, CompactSidebarDotRadius, CompactSidebarDotInset);
+
+        var icons = new[]
+        {
+            FontAwesomeIcon.User,
+            FontAwesomeIcon.Star,
+            FontAwesomeIcon.Home,
+            FontAwesomeIcon.Compass,
+            FontAwesomeIcon.UserCog,
+            FontAwesomeIcon.Cog,
+        };
+        var labels = new[] { "Contacts", "Favorites", "Venues", "Discover", "Groups", "Settings" };
+        var actions = new Action[]
+        {
+            () => SetActiveView(0),
+            () => SetActiveView(1),
+            () => SetActiveView(2),
+            () => SetActiveView(3),
+            () => SetActiveView(4),
+            () => settingsWindow.IsOpen = true,
+        };
+
+        var buttonCount = labels.Length;
+        var innerPad = 8f * scale;
+        var buttonSize = new Vector2(32f, 28f) * scale;
+        var spacing = MathF.Max(7f * scale, (width - innerPad * 2f - buttonSize.X * buttonCount) / MathF.Max(1, buttonCount - 1));
+        var buttonY = pos.Y + (height - buttonSize.Y) * 0.5f;
+        var x = pos.X + innerPad;
+
+        for (var i = 0; i < buttonCount; i++)
+        {
+            DrawBottomNavigationButton(drawList, icons[i], labels[i], i == config.ActiveView && i != 5, new Vector2(x, buttonY), buttonSize, actions[i]);
+            if (i < buttonCount - 1)
+            {
+                var sepX = x + buttonSize.X + spacing * 0.5f;
+                drawList.AddLine(new Vector2(sepX, pos.Y + 7f * scale), new Vector2(sepX, pos.Y + height - 7f * scale), Color(Alpha(Vector4.One, 0.08f)), 1f * scale);
+            }
+            x += buttonSize.X + spacing;
+        }
+
+        drawList.PopClipRect();
+        ImGui.SetCursorScreenPos(cursor + new Vector2(0f, height));
+    }
+
+    private void DrawBottomNavigationButton(ImDrawListPtr drawList, FontAwesomeIcon icon, string tooltip, bool selected, Vector2 pos, Vector2 size, Action click)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var rounding = CompactSidebarRailRounding * scale;
+        using var id = ImRaii.PushId($"bottom-nav-{tooltip}");
+
+        ImGui.SetCursorScreenPos(pos);
+        var clicked = ImGui.InvisibleButton("button", size);
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        var active = ImGui.IsItemActive();
+        if (clicked)
+            click();
+
+        var fill = active
+            ? Alpha(config.AccentColor, 0.22f)
+            : selected
+                ? Alpha(config.AccentColor, 0.16f)
+                : hovered
+                    ? Alpha(UiColors.Get("ButtonDefault"), 0.30f)
+                    : Vector4.Zero;
+        if (fill.W > 0.001f)
+            drawList.AddRectFilled(pos, pos + size, Color(fill), rounding);
+
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var iconText = icon.ToIconString();
+            var iconSize = 16.2f * scale;
+            var iconCalc = ImGui.CalcTextSize(iconText) * (iconSize / MathF.Max(1f, ImGui.GetFontSize()));
+            drawList.AddText(UiBuilder.IconFont, iconSize, pos + (size - iconCalc) * 0.5f, Color(selected || hovered || active ? config.AccentColor : UiColors.TextDim), iconText);
+        }
+
+        if (selected || hovered || active)
+            DrawGlowRect(drawList, pos, pos + size, config.AccentColor, rounding, selected ? 0.12f : 0.08f);
+
+        if (hovered)
+            DrawFloatingTooltip(drawList, tooltip, pos + new Vector2(size.X * 0.5f, -4f * scale));
+    }
+
+
+    private void DrawFloatingTooltip(ImDrawListPtr drawList, string text, Vector2 anchor)
+    {
+        var tooltipDrawList = ImGui.GetForegroundDrawList();
+        var scale = ImGuiHelpers.GlobalScale;
+        var fontSize = 13.1f * scale;
+        var textSize = ImGui.CalcTextSize(text) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+        var pad = new Vector2(7f, 5f) * scale;
+        var size = textSize + pad * 2f;
+        var pos = new Vector2(anchor.X - size.X * 0.5f, anchor.Y - size.Y - 5f * scale);
+        var rounding = 4f * scale;
+
+        tooltipDrawList.AddRectFilled(pos, pos + size, Color(Alpha(UiColors.Get("PrivatePopupBg"), 0.99f)), rounding);
+        tooltipDrawList.AddRect(pos, pos + size, Color(Alpha(config.AccentColor, 0.48f)), rounding, ImDrawFlags.None, 1f * scale);
+        DrawTextWithShadow(tooltipDrawList, pos + pad, Color(UiColors.Text), text, fontSize);
+    }
+
+    private void DrawFooter()
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var width = windowContentWidth;
+        var height = InitialFooterHeightEstimate * scale;
+        var drawList = ImGui.GetWindowDrawList();
+        var pos = ImGui.GetCursorScreenPos();
+        var size = new Vector2(width, height);
+        var rounding = 4f * scale;
+
+        drawList.AddRectFilled(pos, pos + size, Color(UiColors.PanelBg), rounding);
+        drawList.AddRect(pos, pos + size, Color(Alpha(config.AccentColor, 0.22f)), rounding, ImDrawFlags.None, 1f * scale);
+
+        var friendsText = $"{friendListService.FriendCount} Friends";
+        var privateText = $"{config.Contacts.Count} On Privacy";
+        var favoritesText = $"{config.Contacts.Count(c => c.Favorite)} Favorites";
+        var textSize = 15.8f * scale;
+
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            drawList.AddText(UiBuilder.IconFont, 11.5f * scale, pos + new Vector2(15f, 11f) * scale, Color(new Vector4(0.22f, 0.88f, 0.32f, 1f)), FontAwesomeIcon.Users.ToIconString());
+        }
+        var firstTextPos = pos + new Vector2(35f, 8f) * scale;
+        DrawTextWithShadow(drawList, firstTextPos, Color(UiColors.TextDim), friendsText, textSize);
+        var firstTextWidth = ImGui.CalcTextSize(friendsText).X * (textSize / MathF.Max(1f, ImGui.GetFontSize()));
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            drawList.AddText(UiBuilder.IconFont, 10.8f * scale, firstTextPos + new Vector2(firstTextWidth + 16f * scale, 3f * scale), Color(config.AccentColor), FontAwesomeIcon.UserCheck.ToIconString());
+        }
+        DrawTextWithShadow(drawList, firstTextPos + new Vector2(firstTextWidth + 35f * scale, 0f), Color(UiColors.TextDim), privateText, textSize);
+
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            drawList.AddText(UiBuilder.IconFont, 11.5f * scale, pos + new Vector2(15f, 35f) * scale, Color(UiColors.Favorite), FontAwesomeIcon.Star.ToIconString());
+        }
+        DrawTextWithShadow(drawList, pos + new Vector2(35f, 32f) * scale, Color(UiColors.TextDim), favoritesText, textSize);
+        ImGui.Dummy(size);
+    }
+
+    private void DrawSidebarButtons()
+    {
+        if (!config.ShowSidebar)
+            return;
+
+        DrawSidebarButton(FontAwesomeIcon.User, "Contacts", () => SetActiveView(0));
+        DrawSidebarSeparator();
+        DrawSidebarButton(FontAwesomeIcon.Star, "Favorites", () => SetActiveView(1));
+        DrawSidebarSeparator();
+        DrawSidebarButton(FontAwesomeIcon.Home, "Venues", () => SetActiveView(2));
+        DrawSidebarSeparator();
+        DrawSidebarButton(FontAwesomeIcon.Compass, "Discover", () => SetActiveView(3));
+        DrawSidebarSeparator();
+        DrawSidebarButton(FontAwesomeIcon.UserCog, "Groups", () => SetActiveView(4));
+        DrawSidebarSeparator();
+        DrawSidebarButton(FontAwesomeIcon.Cog, "Settings", () => settingsWindow.IsOpen = true);
+    }
+
+
+    private void SetActiveView(int view)
+    {
+        if (config.ActiveView == view) return;
+        log.Information("Privacy: switching view from {OldView} to {NewView}.", config.ActiveView, view);
+        config.ActiveView = view;
+        editingNotesContactId = null;
+        inlineNotesBuffer = string.Empty;
+        focusInlineNotesContactId = null;
+        editingVenueLocation = null;
+        editingVenueTeleport = null;
+        openVenueLocationPopup = false;
+        openVenueTeleportPopup = false;
+        openVenueColorPopup = false;
+        editingVenueColor = null;
+        config.Save();
+    }
+    private void DrawSidebarButton(FontAwesomeIcon icon, string tooltip, Action? click)
+    {
+        var buttonSize = GetSidebarButtonSize();
+        var contentWidth = GetWindowContentRegionWidth();
+        var offsetX = MathF.Max(0f, (contentWidth - buttonSize.X) * 0.5f);
+        ImGui.SetCursorPosX(ImGui.GetWindowContentRegionMin().X + offsetX);
+
+        using var id = ImRaii.PushId(tooltip);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        using (ImRaii.PushColor(ImGuiCol.Button, Vector4.Zero))
+        using (ImRaii.PushColor(ImGuiCol.ButtonHovered, Alpha(config.AccentColor, 0.18f)))
+        using (ImRaii.PushColor(ImGuiCol.ButtonActive, Alpha(config.AccentColor, 0.30f)))
+        {
+            if (ImGui.Button(icon.ToIconString(), buttonSize))
+                click?.Invoke();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            DrawGlowAroundLastItem(config.AccentColor, 0.16f);
+            ImGui.SetTooltip(tooltip);
+        }
+    }
+
+    private static void DrawSidebarSeparator()
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        var min = ImGui.GetCursorScreenPos() + new Vector2(6f, 5f) * ImGuiHelpers.GlobalScale;
+        var max = new Vector2(ImGui.GetWindowPos().X + ImGui.GetWindowSize().X - 6f * ImGuiHelpers.GlobalScale, min.Y);
+        drawList.AddLine(min, max, Color(new Vector4(1f, 1f, 1f, 0.08f)), 1f * ImGuiHelpers.GlobalScale);
+        ImGui.Dummy(new Vector2(1f, 10f) * ImGuiHelpers.GlobalScale);
+    }
+
+    private void DrawCompactSidebarSideToggleButton()
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var buttonHeight = CompactSidebarToggleHeight * scale;
+        var contentWidth = GetWindowContentRegionWidth();
+        var buttonWidth = MathF.Max(1f, contentWidth - CompactSidebarToggleHorizontalInset * 2f * scale);
+        var contentMinX = ImGui.GetWindowContentRegionMin().X;
+        var offsetX = MathF.Max(0f, (contentWidth - buttonWidth) * 0.5f);
+        var buttonLabel = config.ShowSidebar ? ">>" : "<<";
+        var tooltip = config.ShowSidebar ? "Collapse sidebar" : "Expand sidebar";
+        var rounding = CompactSidebarToggleRounding * scale;
+        var buttonSize = new Vector2(buttonWidth, buttonHeight);
+
+        ImGui.SetCursorPosX(contentMinX + offsetX);
+        var clicked = ImGui.InvisibleButton("##compact_sidebar_side_toggle", buttonSize);
+        var rectMin = ImGui.GetItemRectMin();
+        var rectMax = ImGui.GetItemRectMax();
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        var active = ImGui.IsItemActive();
+        var drawList = ImGui.GetWindowDrawList();
+        var fillColor = active
+            ? Alpha(config.AccentColor, 0.22f)
+            : hovered
+                ? Alpha(UiColors.Get("ButtonDefault"), 0.26f)
+                : Alpha(UiColors.Get("ButtonDefault"), 0.14f);
+
+        drawList.AddRectFilled(rectMin, rectMax, Color(fillColor), rounding);
+
+        var textSize = ImGui.CalcTextSize(buttonLabel);
+        var textPos = new Vector2(rectMin.X + (buttonSize.X - textSize.X) * 0.5f, rectMin.Y + (buttonSize.Y - textSize.Y) * 0.5f);
+        drawList.AddText(textPos, Color(ImGui.GetStyle().Colors[(int)ImGuiCol.Text]), buttonLabel);
+
+        if (clicked)
+        {
+            config.ShowSidebar = !config.ShowSidebar;
+            config.Save();
+        }
+
+        if (hovered)
+        {
+            DrawGlowRect(drawList, rectMin, rectMax, config.AccentColor, rounding, 0.10f);
+            ImGui.SetTooltip(tooltip);
+        }
+    }
+
+    private void DrawSidebarColumnPattern(ImDrawListPtr drawList, Vector2 columnWindowPos, Vector2 columnWindowSize)
+    {
+        if (columnWindowSize.X <= 0f || columnWindowSize.Y <= 0f)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var inset = CompactSidebarDotInset * scale;
+        var patternWidth = columnWindowSize.X - inset * 2f;
+        var dotColumns = Math.Max(2, CompactSidebarDotColumns);
+        var dynamicSpacing = patternWidth / (dotColumns - 1);
+
+        sidebarDotRenderer.Draw(
+            drawList,
+            columnWindowPos,
+            columnWindowSize,
+            Alpha(config.AccentColor, CompactSidebarDotAlpha),
+            dotColumns,
+            dynamicSpacing / scale,
+            CompactSidebarDotRadius,
+            CompactSidebarDotInset);
+    }
+
+    private void DrawSidebarRailHighlight(ImDrawListPtr drawList, Vector2 railWindowPos, Vector2 railWindowSize)
+    {
+        if (railWindowSize.X <= 0f || railWindowSize.Y <= 0f)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var rounding = CompactSidebarRailRounding * scale;
+        var thickness = CompactSidebarRailBorderThickness * scale;
+        drawList.AddRect(railWindowPos, railWindowPos + railWindowSize, Color(Alpha(config.AccentColor, CompactSidebarRailHighlightAlpha)), rounding, ImDrawFlags.None, thickness);
+    }
+
+    private void DrawMainColumnGradient(ImDrawListPtr drawList, float gradientTop, float gradientBottom)
+    {
+        if (gradientBottom <= gradientTop)
+            return;
+
+        var min = new Vector2(ImGui.GetWindowPos().X + ImGui.GetWindowContentRegionMin().X, gradientTop);
+        var max = new Vector2(min.X + windowContentWidth, gradientBottom);
+        var gradientTint = Lighten(config.WindowBackgroundColor, 0.035f);
+        drawList.AddRectFilledMultiColor(
+            min,
+            max,
+            Color(Alpha(gradientTint, 0.10f)),
+            Color(Alpha(gradientTint, 0.04f)),
+            Color(new Vector4(0f, 0f, 0f, 0f)),
+            Color(new Vector4(0f, 0f, 0f, 0f)));
+    }
+
+    private void DrawHeaderParticles(ImDrawListPtr drawList, Vector2 headerStart, Vector2 size)
+    {
+        var color = Alpha(config.AccentColor, 0.20f);
+        var scale = ImGuiHelpers.GlobalScale;
+        var spacing = 17f * scale;
+        var radius = 0.9f * scale;
+        var headerEnd = headerStart + size;
+        drawList.PushClipRect(headerStart, headerEnd, true);
+
+        for (var y = headerStart.Y + 8f * scale; y < headerEnd.Y - 8f * scale; y += spacing)
+        {
+            for (var x = headerStart.X + 8f * scale; x < headerEnd.X - 8f * scale; x += spacing)
+                drawList.AddCircleFilled(new Vector2(x, y), radius, Color(color), 8);
+        }
+
+        drawList.AddLine(headerStart + new Vector2(size.X * 0.53f, 0f), headerStart + new Vector2(size.X * 0.84f, size.Y), Color(Alpha(config.AccentColor, 0.18f)), 2f * scale);
+        drawList.AddLine(headerStart + new Vector2(size.X * 0.67f, 0f), headerStart + new Vector2(size.X * 0.96f, size.Y), Color(Alpha(config.AccentColor, 0.07f)), 1f * scale);
+        drawList.PopClipRect();
+    }
+
+    private void DrawHeaderBottomGradient(ImDrawListPtr drawList, Vector2 headerStart, Vector2 headerEnd, float width)
+    {
+        const int bands = 8;
+        var gradientHeight = 60f * ImGuiHelpers.GlobalScale;
+        var bottom = new Vector4(config.WindowBackgroundColor.X, config.WindowBackgroundColor.Y, config.WindowBackgroundColor.Z, 1f);
+        for (var i = 0; i < bands; i++)
+        {
+            var t0 = (float)i / bands;
+            var t1 = (float)(i + 1) / bands;
+            var s0 = t0 * t0;
+            var s1 = t1 * t1;
+            var color0 = new Vector4(bottom.X, bottom.Y, bottom.Z, 1f - s0);
+            var color1 = new Vector4(bottom.X, bottom.Y, bottom.Z, 1f - s1);
+            var y0 = headerEnd.Y - gradientHeight + gradientHeight * t0;
+            var y1 = headerEnd.Y - gradientHeight + gradientHeight * t1;
+            drawList.AddRectFilledMultiColor(
+                new Vector2(headerStart.X, y0),
+                new Vector2(headerStart.X + width, y1),
+                Color(color0),
+                Color(color0),
+                Color(color1),
+                Color(color1));
+        }
+    }
+
+    private void DrawFilterControlPattern(Vector2 rectMin, Vector2 size)
+    {
+        if (size.X <= 0f || size.Y <= 0f)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var inset = new Vector2(6f * scale, 5f * scale);
+        var spacing = 8f * scale;
+        var radius = MathF.Max(0.55f, 0.72f * scale);
+        var patternMin = rectMin + inset;
+        var patternMax = rectMin + size - inset;
+        if (patternMax.X <= patternMin.X || patternMax.Y <= patternMin.Y)
+            return;
+
+        var drawList = ImGui.GetWindowDrawList();
+        if (IsCustomMainBackgroundActive())
+        {
+            var rounding = ImGui.GetStyle().FrameRounding;
+            DrawSoftShadowRect(drawList, rectMin, rectMin + size, rounding, 0.20f);
+            drawList.AddRectFilled(rectMin, rectMin + size, Color(new Vector4(0f, 0f, 0f, 0.38f)), rounding);
+            drawList.AddRect(rectMin, rectMin + size, Color(Alpha(config.AccentColor, 0.36f)), rounding, ImDrawFlags.None, MathF.Max(1f, 1.15f * scale));
+        }
+
+        var dotColor = IsCustomMainBackgroundActive() ? Alpha(UiColors.TextDim, 0.28f) : Alpha(UiColors.TextDim, 0.16f);
+        drawList.PushClipRect(patternMin, patternMax, true);
+
+        var startX = MathF.Ceiling(patternMin.X / spacing) * spacing;
+        var startY = MathF.Ceiling(patternMin.Y / spacing) * spacing;
+        for (var y = startY; y < patternMax.Y; y += spacing)
+        {
+            for (var x = startX; x < patternMax.X; x += spacing)
+                drawList.AddCircleFilled(new Vector2(x, y), radius, Color(dotColor), 8);
+        }
+
+        drawList.PopClipRect();
+    }
+
+    private void RegisterFilterControlBorder(Vector2 rectMin, Vector2 rectMax, bool hovered, bool active, bool enabled = true)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var rounding = ImGui.GetStyle().FrameRounding;
+        var borderColor = !enabled
+            ? Alpha(UiColors.TextDim, 0.08f)
+            : active
+                ? Alpha(config.AccentColor, 0.55f)
+                : hovered
+                    ? Alpha(config.AccentColor, 0.38f)
+                    : Alpha(config.AccentColor, 0.18f);
+
+        drawList.AddRect(rectMin, rectMax, Color(borderColor), rounding, ImDrawFlags.None, scale);
+        if (hovered || active)
+            DrawGlowRect(drawList, rectMin, rectMax, config.AccentColor, rounding, active ? 0.16f : 0.10f);
+    }
+
+    private Vector2 CalcIconTextButtonSize(FontAwesomeIcon icon, string label)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var textSize = ImGui.CalcTextSize(label);
+        Vector2 iconSize;
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+            iconSize = ImGui.CalcTextSize(icon.ToIconString());
+        return new Vector2(iconSize.X + textSize.X + 29f * scale, ImGui.GetFrameHeight());
+    }
+
+    private bool IconOnlyButton(FontAwesomeIcon icon, string id, Vector2 size)
+    {
+        var clicked = ImGui.Button($"##{id}_icon_button", size);
+        var min = ImGui.GetItemRectMin();
+        var scale = ImGuiHelpers.GlobalScale;
+        var iconText = icon.ToIconString();
+        var drawList = ImGui.GetWindowDrawList();
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var iconFontSize = 13f * scale;
+            var iconSize = ImGui.CalcTextSize(iconText) * (iconFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            drawList.AddText(UiBuilder.IconFont, iconFontSize, min + (size - iconSize) * 0.5f, Color(UiColors.TextDim), iconText);
+        }
+        return clicked;
+    }
+
+    private bool IconTextButton(FontAwesomeIcon icon, string label, Vector2 size)
+    {
+        var clicked = ImGui.Button($"##{label}_icon_text_button", size);
+        var min = ImGui.GetItemRectMin();
+        var scale = ImGuiHelpers.GlobalScale;
+        var iconText = icon.ToIconString();
+        var drawList = ImGui.GetWindowDrawList();
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+            drawList.AddText(UiBuilder.IconFont, 13f * scale, min + new Vector2(8f, 7f) * scale, Color(UiColors.TextDim), iconText);
+        DrawTextWithShadow(drawList, min + new Vector2(29f, 5.5f) * scale, Color(UiColors.TextDim), label, 13f * scale);
+        return clicked;
+    }
+
+    private void DrawTextWithShadow(ImDrawListPtr drawList, Vector2 pos, uint color, string text, float? fontSize = null)
+    {
+        var font = ImGui.GetFont();
+        var size = fontSize ?? ImGui.GetFontSize();
+        var shadow = ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.78f));
+
+        if (IsCustomMainBackgroundActive())
+        {
+            var outline = ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.88f));
+            var px = MathF.Max(0.75f, 0.8f * ImGuiHelpers.GlobalScale);
+            drawList.AddText(font, size, pos + new Vector2(-px, 0f), outline, text);
+            drawList.AddText(font, size, pos + new Vector2(px, 0f), outline, text);
+            drawList.AddText(font, size, pos + new Vector2(0f, -px), outline, text);
+            drawList.AddText(font, size, pos + new Vector2(0f, px), outline, text);
+            drawList.AddText(font, size, pos + new Vector2(-px, -px), outline, text);
+            drawList.AddText(font, size, pos + new Vector2(px, px), outline, text);
+        }
+        else
+        {
+            drawList.AddText(font, size, pos + new Vector2(1.2f, 1.2f), shadow, text);
+        }
+
+        drawList.AddText(font, size, pos, color, text);
+    }
+
+    private static void DrawGlowAroundLastItem(Vector4 color, float intensity)
+    {
+        DrawGlowRect(ImGui.GetWindowDrawList(), ImGui.GetItemRectMin(), ImGui.GetItemRectMax(), color, ImGui.GetStyle().FrameRounding, intensity);
+    }
+
+    private static void DrawSoftShadowRect(ImDrawListPtr drawList, Vector2 min, Vector2 max, float rounding, float strength = 0.20f)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        for (var i = 4; i >= 1; i--)
+        {
+            var expand = i * 2.2f * scale;
+            var alpha = strength * (0.16f / i);
+            drawList.AddRectFilled(
+                min - new Vector2(expand, expand * 0.55f),
+                max + new Vector2(expand, expand * 0.95f),
+                ImGui.GetColorU32(new Vector4(0f, 0f, 0f, alpha)),
+                rounding + expand);
+        }
+    }
+
+    private static void DrawGlowRect(ImDrawListPtr drawList, Vector2 min, Vector2 max, Vector4 color, float rounding, float intensity)
+    {
+        var c1 = Color(Alpha(color, intensity));
+        var c2 = Color(Alpha(color, intensity * 0.45f));
+        drawList.AddRectFilled(min - new Vector2(2f), max + new Vector2(2f), c2, rounding + 2f);
+        drawList.AddRect(min, max, c1, rounding, ImDrawFlags.None, 1.5f * ImGuiHelpers.GlobalScale);
+    }
+
+    private void DrawRowDivider(float x1, float x2, float y, Vector4 color, float alpha)
+    {
+        if (x2 <= x1)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var fade = MathF.Min(42f * scale, (x2 - x1) * 0.34f);
+        var thickness = MathF.Max(1f, 1f * scale);
+        var solid = Alpha(color, alpha);
+        var clear = Alpha(color, 0f);
+        var y2 = y + thickness;
+
+        drawList.AddRectFilledMultiColor(new Vector2(x1, y), new Vector2(x1 + fade, y2), Color(clear), Color(solid), Color(solid), Color(clear));
+        drawList.AddRectFilled(new Vector2(x1 + fade, y), new Vector2(x2 - fade, y2), Color(solid));
+        drawList.AddRectFilledMultiColor(new Vector2(x2 - fade, y), new Vector2(x2, y2), Color(solid), Color(clear), Color(clear), Color(solid));
+    }
+
+    private void OpenImagePicker(PrivateContact contact)
+    {
+        pendingImageContact = contact;
+        lastImageError = string.Empty;
+        fileDialog.OpenFileDialog(
+            "Choose profile image",
+            "Image files{.png,.jpg,.jpeg,.webp}",
+            (success, paths) =>
+            {
+                if (!success || paths.Count == 0 || pendingImageContact == null)
+                    return;
+
+                if (profileImages.TryImportImage(paths[0], pendingImageContact.Id, out var storedPath, out var error))
+                {
+                    pendingImageContact.ProfileImagePath = storedPath;
+                    pendingImageContact.CloudManagedProfileImage = false;
+                    config.Save();
+                }
+                else
+                {
+                    lastImageError = error;
+                }
+            },
+            1,
+            null,
+            true);
+    }
+
+    private void DrawContactContextPopup(PrivateContact contact)
+    {
+        if (!ImGui.BeginPopup("contact-context"))
+            return;
+
+        if (ImGui.MenuItem("Remove"))
+        {
+            listService.Remove(contact);
+            if (editingNotesContactId == contact.Id)
+            {
+                editingNotesContactId = null;
+                inlineNotesBuffer = string.Empty;
+                focusInlineNotesContactId = null;
+            }
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Quick note"))
+        {
+            OpenQuickNoteEditor(contact);
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("View online profile"))
+        {
+            log.Information("Privacy: View online profile clicked for {Name}@{World}; cloudLinked={CloudLinked}; cloudProfileId={CloudProfileId}.", contact.Name, contact.World, contact.CloudAccountLinked, contact.CloudProfileId);
+            if (contact.CloudAccountLinked)
+                onlineProfileWindow.Open(contact);
+            else
+            {
+                unregisteredProfileWindowPos = ResolveContextSubWindowPos();
+                unregisteredProfileWindowOpen = true;
+            }
+
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (config.MinimalMode && !contact.HasSoftWarning)
+        {
+            ImGui.Separator();
+            if (ImGui.MenuItem("Tell")) { SendTell(contact); ImGui.CloseCurrentPopup(); }
+            if (ImGui.MenuItem("Party")) { InviteParty(contact); ImGui.CloseCurrentPopup(); }
+            if (ImGui.MenuItem("Teleport to user")) { TravelTo(contact); ImGui.CloseCurrentPopup(); }
+            if (ImGui.MenuItem("Estate Teleportation")) { estateTeleportWindow.Open(contact); ImGui.CloseCurrentPopup(); }
+            if (ImGui.MenuItem("Tag")) { OpenTagEditor(contact); ImGui.CloseCurrentPopup(); }
+            if (ImGui.MenuItem("Notes")) { notesWindow.Open(contact); ImGui.CloseCurrentPopup(); }
+        }
+
+        if (ImGui.MenuItem("Edit profile"))
+        {
+            contactProfileWindow.Open(contact);
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Status history"))
+        {
+            contactProfileWindow.Open(contact);
+            ImGui.CloseCurrentPopup();
+        }
+
+        var groupsForContact = GetGroupsForContact(contact).ToList();
+        if (groupsForContact.Count > 0)
+        {
+            if (ImGui.BeginMenu("Remove from group"))
+            {
+                foreach (var group in groupsForContact)
+                {
+                    if (ImGui.MenuItem(group.Name))
+                    {
+                        group.ContactIds.RemoveAll(id => string.Equals(id, contact.Id, StringComparison.Ordinal));
+                        log.Information("Privacy: removed {Name}@{World} from group {GroupName}.", contact.Name, contact.World, group.Name);
+                        config.Save();
+                        ImGui.CloseCurrentPopup();
+                    }
+                }
+
+                if (groupsForContact.Count > 1)
+                {
+                    ImGui.Separator();
+                    if (ImGui.MenuItem("Remove from all groups"))
+                    {
+                        foreach (var group in groupsForContact)
+                            group.ContactIds.RemoveAll(id => string.Equals(id, contact.Id, StringComparison.Ordinal));
+                        log.Information("Privacy: removed {Name}@{World} from all groups.", contact.Name, contact.World);
+                        config.Save();
+                        ImGui.CloseCurrentPopup();
+                    }
+                }
+
+                ImGui.EndMenu();
+            }
+        }
+        else if (ImGui.BeginMenu("Add to a group"))
+        {
+            if (config.Groups.Count == 0)
+            {
+                ImGui.TextDisabled("No groups created yet.");
+            }
+            else
+            {
+                foreach (var group in config.Groups)
+                {
+                    if (ImGui.MenuItem(group.Name))
+                    {
+                        AddContactToGroup(contact, group);
+                        ImGui.CloseCurrentPopup();
+                    }
+                }
+            }
+            ImGui.EndMenu();
+        }
+
+        ImGui.EndPopup();
+    }
+
+    private IEnumerable<PrivateGroup> GetGroupsForContact(PrivateContact contact)
+        => config.Groups.Where(group => group.ContactIds.Contains(contact.Id, StringComparer.Ordinal));
+
+    private void AddContactToGroup(PrivateContact contact, PrivateGroup group)
+    {
+        if (!group.ContactIds.Contains(contact.Id, StringComparer.Ordinal))
+        {
+            group.ContactIds.Add(contact.Id);
+            log.Information("Privacy: added {Name}@{World} to group {GroupName}.", contact.Name, contact.World, group.Name);
+            config.Save();
+        }
+    }
+
+    private void OpenQuickNoteEditor(PrivateContact contact)
+    {
+        quickNoteContact = contact;
+        quickNoteBuffer = contact.HoverNote ?? string.Empty;
+        quickNoteWindowPos = ResolveContextSubWindowPos();
+        quickNoteWindowOpen = true;
+        openQuickNoteNextFrame = false;
+    }
+
+    private Vector2 ResolveContextSubWindowPos()
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        return ImGui.GetWindowPos() + new Vector2(0f, ImGui.GetWindowSize().Y + 4f * scale);
+    }
+
+    private void OpenTagEditor(PrivateContact contact)
+    {
+        tagContact = contact;
+        tagBuffer = contact.Tag ?? string.Empty;
+        tagColorHexBuffer = NormalizeHex(contact.TagColorHex, "#FFD56A");
+        tagPickerColor = UiColors.HexToRgba(tagColorHexBuffer);
+        editingExistingTag = string.Empty;
+        tagEditorWindowOpen = true;
+    }
+
+    private void DrawDeferredPopups()
+    {
+        if (openQuickNoteNextFrame)
+            openQuickNoteNextFrame = false;
+
+        DrawQuickNoteWindow();
+        DrawTagWindow();
+        DrawMissingLifestreamPopup();
+        DrawUnregisteredProfileWindow();
+        DrawImageErrorPopup();
+    }
+
+    private void DrawQuickNoteWindow()
+    {
+        if (!quickNoteWindowOpen)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowPos(quickNoteWindowPos, ImGuiCond.Always);
+        ImGui.SetNextWindowSize(new Vector2(392f, 220f) * scale, ImGuiCond.Always);
+
+        using var windowBg = ImRaii.PushColor(ImGuiCol.WindowBg, Vector4.Zero);
+        using var border = ImRaii.PushColor(ImGuiCol.Border, Vector4.Zero);
+        using var titleBg = ImRaii.PushColor(ImGuiCol.TitleBg, UiColors.Get("PrivateTitleBg"));
+        using var titleBgActive = ImRaii.PushColor(ImGuiCol.TitleBgActive, UiColors.Get("PrivateTitleBgActive"));
+        using var padding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(8f, 0f) * scale);
+        using var rounding = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 7f * scale);
+
+        var open = true;
+        if (!ImGui.Begin("Privacy Quick Note###PrivacyQuickNoteWindow", ref open, ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoMove))
+        {
+            ImGui.End();
+            quickNoteWindowOpen = open;
+            return;
+        }
+
+        WindowEdgeFade.DrawUnified(config.WindowBackgroundColor);
+
+        if (quickNoteContact == null)
+        {
+            ImGui.TextUnformatted("No contact selected.");
+            if (ImGui.Button("Close"))
+                open = false;
+            ImGui.End();
+            quickNoteWindowOpen = open;
+            return;
+        }
+
+        ImGui.TextUnformatted($"Quick note for {quickNoteContact.Name}");
+        ImGui.SetNextItemWidth(360f * scale);
+        ImGui.InputTextMultiline("##quick_note_text", ref quickNoteBuffer, 1024, new Vector2(360f, 110f) * scale);
+
+        if (ImGui.Button("Save", new Vector2(100f, 0f) * scale))
+        {
+            quickNoteContact.HoverNote = quickNoteBuffer;
+            log.Information("Privacy: saved quick note for {Name}@{World}; length={Length}.", quickNoteContact.Name, quickNoteContact.World, quickNoteBuffer.Length);
+            config.Save();
+            open = false;
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Clear", new Vector2(100f, 0f) * scale))
+        {
+            quickNoteBuffer = string.Empty;
+            quickNoteContact.HoverNote = string.Empty;
+            config.Save();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Cancel", new Vector2(100f, 0f) * scale))
+            open = false;
+
+        ImGui.End();
+
+        if (!open)
+        {
+            quickNoteWindowOpen = false;
+            quickNoteContact = null;
+        }
+    }
+
+    private void DrawTagWindow()
+    {
+        if (!tagEditorWindowOpen)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowSize(new Vector2(397f, 329f) * scale, ImGuiCond.FirstUseEver);
+
+        using var windowBg = ImRaii.PushColor(ImGuiCol.WindowBg, UiColors.Get("PrivatePopupBg"));
+        using var border = ImRaii.PushColor(ImGuiCol.Border, UiColors.Get("PrivateBorder"));
+        using var titleBg = ImRaii.PushColor(ImGuiCol.TitleBg, UiColors.Get("PrivateTitleBg"));
+        using var titleBgActive = ImRaii.PushColor(ImGuiCol.TitleBgActive, UiColors.Get("PrivateTitleBgActive"));
+        using var padding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(8f, 8f) * scale);
+        using var rounding = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 7f * scale);
+
+        var open = true;
+        if (!ImGui.Begin("Privacy Tag###PrivacyTagEditor", ref open, ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoCollapse))
+        {
+            ImGui.End();
+            if (!open) CloseTagEditor();
+            return;
+        }
+
+        if (tagContact == null)
+        {
+            ImGui.TextUnformatted("No contact selected.");
+            if (ImGui.Button("Close"))
+                CloseTagEditor();
+            ImGui.End();
+            if (!open) CloseTagEditor();
+            return;
+        }
+
+        var drawList = ImGui.GetWindowDrawList();
+        var pos = ImGui.GetCursorScreenPos();
+        var width = ImGui.GetContentRegionAvail().X;
+        var headerHeight = 92f * scale;
+
+        var tagHeaderTop = Lighten(Alpha(config.WindowBackgroundColor, MathF.Min(1f, MathF.Max(0.38f, config.WindowBackgroundColor.W))), 0.028f);
+        var tagHeaderBottom = Alpha(config.WindowBackgroundColor, 0.0f);
+        drawList.AddRectFilledMultiColor(
+            pos,
+            pos + new Vector2(width, headerHeight),
+            Color(tagHeaderTop),
+            Color(tagHeaderTop),
+            Color(tagHeaderBottom),
+            Color(tagHeaderBottom));
+
+        var existingTags = config.Contacts.Concat(config.Venues)
+            .Where(c => !string.IsNullOrWhiteSpace(c.Tag))
+            .GroupBy(c => c.Tag.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(g => new
+            {
+                Text = g.First().Tag.Trim(),
+                Color = NormalizeHex(g.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c.TagColorHex))?.TagColorHex, "#FFD56A"),
+            })
+            .OrderBy(t => t.Text, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var tagX = pos.X + 8f * scale;
+        var tagY = pos.Y + 8f * scale;
+        var gap = 4f * scale;
+        var tagButtonHeight = 25f * scale;
+        var maxX = pos.X + width - 8f * scale;
+        if (existingTags.Count == 0)
+        {
+            DrawTextWithShadow(drawList, new Vector2(tagX, tagY + 8f * scale), Color(Alpha(UiColors.TextDim, 0.72f)), "No saved tags yet.", 13.8f * scale);
+        }
+        else
+        {
+            foreach (var tag in existingTags)
+            {
+                var color = UiColors.HexToRgba(tag.Color);
+                var tagFontSize = 14.8f * scale;
+                var tagTextSize = ImGui.CalcTextSize(tag.Text) * (tagFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+                var tagButtonWidth = Math.Clamp(tagTextSize.X + 22f * scale, 44f * scale, MathF.Min(150f * scale, width - 16f * scale));
+
+                if (tagX + tagButtonWidth > maxX)
+                {
+                    tagX = pos.X + 8f * scale;
+                    tagY += tagButtonHeight + gap;
+                }
+
+                if (tagY + tagButtonHeight > pos.Y + headerHeight - 4f * scale)
+                    break;
+
+                var action = DrawReusableTagButton(tag.Text, color, new Vector2(tagX, tagY), tagButtonWidth, tagButtonHeight);
+                tagX += tagButtonWidth + gap;
+
+                if (action == 1)
+                {
+                    ApplyTagAndClose(tag.Text, tag.Color);
+                    ImGui.End();
+                    return;
+                }
+
+                if (action == 2)
+                {
+                    DeleteExistingTag(tag.Text);
+                    ImGui.End();
+                    return;
+                }
+
+                if (action == 3)
+                {
+                    BeginEditExistingTag(tag.Text, tag.Color);
+                    break;
+                }
+            }
+        }
+
+        ImGui.Dummy(new Vector2(width, headerHeight));
+
+        using (var child = ImRaii.Child("tag-body", new Vector2(-1f, -1f), true))
+        {
+            if (child)
+            {
+                ImGui.TextColored(config.AccentColor, $"{tagContact.Name}@{tagContact.World}");
+                ImGui.TextDisabled("This tag appears after the contact name.");
+                if (!string.IsNullOrWhiteSpace(editingExistingTag))
+                    ImGui.TextColored(UiColors.Favorite, $"Editing saved tag: {editingExistingTag}");
+                ImGui.Separator();
+
+                ImGui.SetNextItemWidth(-1f);
+                ImGui.InputTextWithHint("##tag_text", "Tag text", ref tagBuffer, 64);
+
+                ImGui.Spacing();
+                ImGui.TextUnformatted("Tag color");
+                DrawColorSquare("tag_color", ref tagPickerColor, ref tagColorHexBuffer);
+                ImGui.SameLine();
+                DrawTextWithShadow(ImGui.GetWindowDrawList(), ImGui.GetCursorScreenPos() + new Vector2(0f, 3f * scale), Color(UiColors.TextDim), tagColorHexBuffer, 13.2f * scale);
+                ImGui.Dummy(new Vector2(90f, 22f) * scale);
+
+                var buttonSize = new Vector2(88f, 24f) * scale;
+                if (ImGui.Button("Save", buttonSize))
+                    ApplyTagAndClose(tagBuffer.Trim(), NormalizeHex(tagColorHexBuffer, "#FFD56A"));
+
+                ImGui.SameLine();
+                if (ImGui.Button("Clear", buttonSize))
+                {
+                    tagBuffer = string.Empty;
+                    tagContact.Tag = string.Empty;
+                    tagContact.TagColorHex = "#FFD56A";
+                    tagPickerColor = UiColors.HexToRgba("#FFD56A");
+                    tagColorHexBuffer = "#FFD56A";
+                    config.Save();
+                }
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel", buttonSize))
+                    CloseTagEditor();
+            }
+        }
+
+        ImGui.End();
+
+        if (!open)
+            CloseTagEditor();
+    }
+
+    private int DrawReusableTagButton(string text, Vector4 color, Vector2 pos, float width, float height)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var fontSize = 14.8f * scale;
+        var size = new Vector2(width, height);
+        var rounding = 4f * scale;
+
+        ImGui.SetCursorScreenPos(pos);
+        var clicked = ImGui.InvisibleButton($"reuse-tag-{text}", size);
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        var rightClicked = hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Right);
+        drawList.AddRect(pos, pos + size, Color(Alpha(color, hovered ? 0.92f : 0.64f)), rounding, ImDrawFlags.None, 1f * scale);
+        drawList.PushClipRect(pos, pos + size, true);
+        DrawTextWithShadow(drawList, pos + new Vector2(9f, 3f) * scale, Color(color), text, fontSize);
+        drawList.PopClipRect();
+
+        if (rightClicked)
+            ImGui.OpenPopup($"tag-context-{text}");
+
+        if (ImGui.BeginPopup($"tag-context-{text}"))
+        {
+            var edit = ImGui.MenuItem("Edit");
+            var delete = ImGui.MenuItem("Delete");
+            ImGui.EndPopup();
+
+            if (edit)
+                return 3;
+            if (delete)
+                return 2;
+        }
+
+        if (hovered)
+            ImGui.SetTooltip($"Apply tag: {text}");
+
+        return clicked ? 1 : 0;
+    }
+
+    private void BeginEditExistingTag(string tagText, string tagColor)
+    {
+        editingExistingTag = tagText;
+        tagBuffer = tagText;
+        tagColorHexBuffer = NormalizeHex(tagColor, "#FFD56A");
+        tagPickerColor = UiColors.HexToRgba(tagColorHexBuffer);
+        log.Information("Privacy: editing saved tag {TagText}.", tagText);
+    }
+
+    private void DeleteExistingTag(string tagText)
+    {
+        foreach (var contact in config.Contacts.Concat(config.Venues).Where(c => string.Equals(c.Tag?.Trim(), tagText, StringComparison.OrdinalIgnoreCase)))
+        {
+            contact.Tag = string.Empty;
+            contact.TagColorHex = "#FFD56A";
+        }
+
+        if (tagContact != null && string.Equals(tagContact.Tag?.Trim(), tagText, StringComparison.OrdinalIgnoreCase))
+        {
+            tagBuffer = string.Empty;
+            tagContact.Tag = string.Empty;
+            tagContact.TagColorHex = "#FFD56A";
+        }
+
+        log.Information("Privacy: deleted saved tag {TagText}.", tagText);
+        config.Save();
+    }
+
+    private void ApplyTagAndClose(string tagText, string tagColor)
+    {
+        if (tagContact == null)
+            return;
+
+        var normalizedTag = tagText.Trim();
+        var normalizedColor = NormalizeHex(tagColor, "#FFD56A");
+
+        if (!string.IsNullOrWhiteSpace(editingExistingTag))
+        {
+            var updated = 0;
+            foreach (var contact in config.Contacts.Concat(config.Venues).Where(c => string.Equals(c.Tag?.Trim(), editingExistingTag, StringComparison.OrdinalIgnoreCase)))
+            {
+                contact.Tag = normalizedTag;
+                contact.TagColorHex = normalizedColor;
+                updated++;
+            }
+
+            log.Information("Privacy: edited saved tag {OldTag} -> {NewTag}; color={Color}; updatedContacts={Count}.", editingExistingTag, normalizedTag, normalizedColor, updated);
+        }
+        else
+        {
+            tagContact.Tag = normalizedTag;
+            tagContact.TagColorHex = normalizedColor;
+            log.Information("Privacy: saved tag for {Name}@{World}; tag={Tag}; color={Color}.", tagContact.Name, tagContact.World, tagContact.Tag, tagContact.TagColorHex);
+        }
+
+        config.Save();
+        CloseTagEditor();
+    }
+
+    private void CloseTagEditor()
+    {
+        tagEditorWindowOpen = false;
+        tagContact = null;
+        editingExistingTag = string.Empty;
+    }
+
+    private bool DrawColorSquare(string id, ref Vector4 color, ref string hexBuffer)
+    {
+        var changed = false;
+        var size = new Vector2(24f, 24f) * ImGuiHelpers.GlobalScale;
+        var flags = ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoDragDrop;
+        if (ImGui.ColorButton($"##{id}_button", color, flags, size))
+            ImGui.OpenPopup($"{id}_picker");
+
+        if (ImGui.BeginPopup($"{id}_picker"))
+        {
+            var picker = new Vector3(color.X, color.Y, color.Z);
+            if (ImGui.ColorPicker3($"##{id}_picker_value", ref picker, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoSidePreview | ImGuiColorEditFlags.NoLabel))
+            {
+                color = new Vector4(picker.X, picker.Y, picker.Z, 1f);
+                hexBuffer = HexFromColor(color);
+                changed = true;
+            }
+            ImGui.EndPopup();
+        }
+
+        return changed;
+    }
+
+    private void DrawUnregisteredProfileWindow()
+    {
+        if (!unregisteredProfileWindowOpen)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowPos(unregisteredProfileWindowPos, ImGuiCond.Always);
+        ImGui.SetNextWindowSize(new Vector2(360f, 118f) * scale, ImGuiCond.Always);
+
+        using var windowBg = ImRaii.PushColor(ImGuiCol.WindowBg, Vector4.Zero);
+        using var border = ImRaii.PushColor(ImGuiCol.Border, Vector4.Zero);
+        using var titleBg = ImRaii.PushColor(ImGuiCol.TitleBg, UiColors.Get("PrivateTitleBg"));
+        using var titleBgActive = ImRaii.PushColor(ImGuiCol.TitleBgActive, UiColors.Get("PrivateTitleBgActive"));
+        using var padding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(8f, 0f) * scale);
+        using var rounding = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 7f * scale);
+
+        var open = true;
+        if (!ImGui.Begin("Privacy Profile###PrivacyUnregisteredProfileWindow", ref open, ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoMove))
+        {
+            ImGui.End();
+            unregisteredProfileWindowOpen = open;
+            return;
+        }
+
+        WindowEdgeFade.DrawUnified(config.WindowBackgroundColor);
+
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + 320f * scale);
+        ImGui.TextWrapped("This user has not registered into Privacy plugin yet.");
+        ImGui.PopTextWrapPos();
+
+        if (ImGui.Button("Close", new Vector2(100f, 0f) * scale))
+            open = false;
+
+        var hovered = ImGui.IsWindowHovered(ImGuiHoveredFlags.RootAndChildWindows);
+        ImGui.End();
+
+        if (!open || (ImGui.IsMouseClicked(ImGuiMouseButton.Left) && !hovered))
+            unregisteredProfileWindowOpen = false;
+    }
+
+    private void DrawMissingLifestreamPopup()
+    {
+        if (!openMissingLifestreamPopup)
+            return;
+
+        ImGui.OpenPopup("Privacy Missing Lifestream");
+        var open = true;
+        var center = ImGui.GetWindowPos() + ImGui.GetWindowSize() * 0.5f;
+        ImGui.SetNextWindowPos(center, ImGuiCond.Always, new Vector2(0.5f, 0.5f));
+        using var popupWindowBg = ImRaii.PushColor(ImGuiCol.WindowBg, Vector4.Zero);
+        using var popupBg = ImRaii.PushColor(ImGuiCol.PopupBg, Vector4.Zero);
+        using var popupBorder = ImRaii.PushColor(ImGuiCol.Border, Vector4.Zero);
+        using var popupTitleBg = ImRaii.PushColor(ImGuiCol.TitleBg, UiColors.Get("PrivateTitleBg"));
+        using var popupTitleBgActive = ImRaii.PushColor(ImGuiCol.TitleBgActive, UiColors.Get("PrivateTitleBgActive"));
+        using var popupPadding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(8f, 0f) * ImGuiHelpers.GlobalScale);
+        if (ImGui.BeginPopupModal("Privacy Missing Lifestream", ref open, ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoMove))
+        {
+            WindowEdgeFade.DrawUnified(config.WindowBackgroundColor);
+            var red = new Vector4(1f, 0.48f, 0.48f, 1f);
+            var purple = UiColors.PurpleHover;
+            ImGui.TextColored(red, "You need to install ");
+            ImGui.SameLine(0f, 0f);
+            ImGui.TextColored(purple, "Lifestream");
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+                ImGui.SetTooltip("Open Lifestream repository");
+            }
+            if (ImGui.IsItemClicked())
+                OpenUrl("https://github.com/NightmareXIV/Lifestream");
+            ImGui.SameLine(0f, 0f);
+            ImGui.TextColored(red, " plugin for this function.");
+
+            ImGui.Spacing();
+            if (ImGui.Button("Close", new Vector2(120f, 0f) * ImGuiHelpers.GlobalScale))
+            {
+                openMissingLifestreamPopup = false;
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
+
+        if (!open)
+            openMissingLifestreamPopup = false;
+    }
+
+    private static void OpenUrl(string url)
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch
+        {
+            // Browser launch failed; keep the popup open so the URL stays visible in code/history.
+        }
+    }
+
+    private void DrawImageErrorPopup()
+    {
+        if (string.IsNullOrWhiteSpace(lastImageError))
+            return;
+
+        ImGui.OpenPopup("Privacy Image Error");
+        var imageErrorOpen = true;
+        using var popupWindowBg = ImRaii.PushColor(ImGuiCol.WindowBg, Vector4.Zero);
+        using var popupBg = ImRaii.PushColor(ImGuiCol.PopupBg, Vector4.Zero);
+        using var popupBorder = ImRaii.PushColor(ImGuiCol.Border, Vector4.Zero);
+        using var popupTitleBg = ImRaii.PushColor(ImGuiCol.TitleBg, UiColors.Get("PrivateTitleBg"));
+        using var popupTitleBgActive = ImRaii.PushColor(ImGuiCol.TitleBgActive, UiColors.Get("PrivateTitleBgActive"));
+        using var popupPadding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(8f, 0f) * ImGuiHelpers.GlobalScale);
+        if (ImGui.BeginPopupModal("Privacy Image Error", ref imageErrorOpen, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            WindowEdgeFade.DrawUnified(config.WindowBackgroundColor);
+            ImGui.TextWrapped(lastImageError);
+            if (ImGui.Button("OK"))
+            {
+                lastImageError = string.Empty;
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    private Vector4 ResolveSymbolColor(PrivateContact contact)
+        => UiColors.WithAlpha(UiColors.HexToRgba(NormalizeHex(contact.ContactSymbolColorHex, "#2BE5B5")), 1f);
+
+    private Vector4 ResolveTagColor(PrivateContact contact)
+        => UiColors.WithAlpha(UiColors.HexToRgba(NormalizeHex(contact.TagColorHex, "#FFD56A")), 1f);
+
+    private static string HexFromColor(Vector4 color)
+    {
+        var r = Math.Clamp((int)MathF.Round(color.X * 255f), 0, 255);
+        var g = Math.Clamp((int)MathF.Round(color.Y * 255f), 0, 255);
+        var b = Math.Clamp((int)MathF.Round(color.Z * 255f), 0, 255);
+        return $"#{r:X2}{g:X2}{b:X2}";
+    }
+
+    private static string NormalizeHex(string? value, string fallback)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (text.StartsWith('#'))
+            text = text[1..];
+
+        if (text.Length != 6 || text.Any(ch => !Uri.IsHexDigit(ch)))
+            return fallback;
+
+        return "#" + text.ToUpperInvariant();
+    }
+
+    private void SendTell(PrivateContact contact)
+    {
+        var command = $"/tell {FormatPlayerAddress(contact)} ";
+        log.Information("Privacy: Tell clicked for {Name}@{World}; command={Command}", contact.Name, contact.World, command);
+        nativeCommands.Execute(command);
+    }
+
+    private void InviteParty(PrivateContact contact)
+    {
+        var command = $"/pcmd add {FormatPlayerAddress(contact)}";
+        log.Information("Privacy: Party clicked for {Name}@{World}; command={Command}", contact.Name, contact.World, command);
+        nativeCommands.Execute(command);
+    }
+
+    private string FormatContactLocation(PrivateContact contact)
+    {
+        var location = contact.DisplayLocation;
+        var venueName = ResolveVenueNameForContact(contact);
+        return string.IsNullOrWhiteSpace(venueName) ? location : $"{location} @At {venueName}";
+    }
+
+    private string ResolveVenueNameForContact(PrivateContact contact)
+    {
+        var address = BuildContactVenueAddress(contact);
+        if (string.IsNullOrWhiteSpace(address))
+            return string.Empty;
+
+        var allVenues = config.CloudSavedVenues
+            .Concat(contact.CloudVenues ?? new List<PrivateVenueBookmark>())
+            .Where(v => !string.IsNullOrWhiteSpace(v.Address));
+
+        var match = allVenues.FirstOrDefault(v => string.Equals(NormalizeVenueAddress(v.Address), NormalizeVenueAddress(address), StringComparison.OrdinalIgnoreCase));
+        return match?.Name ?? string.Empty;
+    }
+
+    private string BuildContactVenueAddress(PrivateContact contact)
+    {
+        var dataCenter = string.IsNullOrWhiteSpace(contact.CurrentDataCenter) ? contact.DataCenter : contact.CurrentDataCenter;
+        var world = string.IsNullOrWhiteSpace(contact.CurrentWorld) ? contact.World : contact.CurrentWorld;
+        var district = ResolveResidentialDistrictForCommand(contact);
+        var ward = ExtractNumberAfter(contact.ResidentialDetails, "Ward");
+        var plot = ExtractNumberAfter(contact.ResidentialDetails, "Plot");
+
+        if (string.IsNullOrWhiteSpace(dataCenter) || string.IsNullOrWhiteSpace(world) ||
+            string.IsNullOrWhiteSpace(district) || string.IsNullOrWhiteSpace(ward) || string.IsNullOrWhiteSpace(plot))
+            return string.Empty;
+
+        return $"{dataCenter} {world} {district} w{ward} p{plot}";
+    }
+
+    private string BuildSmartTravelCommand(PrivateContact contact)
+    {
+        var address = BuildContactVenueAddress(contact);
+        if (!string.IsNullOrWhiteSpace(address))
+            return $"/li {address}";
+
+        return listService.BuildTravelCommand(contact);
+    }
+
+    private static string ResolveResidentialDistrictForCommand(PrivateContact contact)
+    {
+        var text = $"{contact.LastKnownZone} {contact.ResidentialDetails}";
+        if (text.Contains("Mist", StringComparison.OrdinalIgnoreCase)) return "Mist";
+        if (text.Contains("Lavender", StringComparison.OrdinalIgnoreCase) || text.Contains("Lavander", StringComparison.OrdinalIgnoreCase)) return "Lb";
+        if (text.Contains("Goblet", StringComparison.OrdinalIgnoreCase)) return "Goblet";
+        if (text.Contains("Shirogane", StringComparison.OrdinalIgnoreCase)) return "Shirogane";
+        if (text.Contains("Empyreum", StringComparison.OrdinalIgnoreCase)) return "Empyreum";
+        return string.Empty;
+    }
+
+    private static string ExtractNumberAfter(string text, string marker)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+        var index = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (index < 0) return string.Empty;
+
+        index += marker.Length;
+        while (index < text.Length && !char.IsDigit(text[index])) index++;
+        var start = index;
+        while (index < text.Length && char.IsDigit(text[index])) index++;
+        return index > start ? text[start..index] : string.Empty;
+    }
+
+    private static string NormalizeVenueAddress(string value)
+        => value.Replace("Lavender Beds", "Lb", StringComparison.OrdinalIgnoreCase)
+            .Replace("Lavander Beds", "Lb", StringComparison.OrdinalIgnoreCase)
+            .Replace("  ", " ", StringComparison.Ordinal)
+            .Trim();
+
+    private void TravelTo(PrivateContact contact)
+    {
+        var command = BuildSmartTravelCommand(contact);
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            log.Warning("Privacy: Meet clicked for {Name}@{World}, but no command could be built.", contact.Name, contact.World);
+            return;
+        }
+
+        log.Information("Privacy: Meet clicked for {Name}@{World}; command={Command}; current={CurrentWorld}; zone={Zone}; residential={Residential}", contact.Name, contact.World, command, contact.CurrentWorld, contact.LastKnownZone, contact.ResidentialDetails);
+
+        if (!nativeCommands.HasRegisteredCommand("/li"))
+        {
+            openMissingLifestreamPopup = true;
+            return;
+        }
+
+        if (!nativeCommands.Execute(command, true))
+            openMissingLifestreamPopup = true;
+    }
+
+    private static string FormatPlayerAddress(PrivateContact contact)
+    {
+        var name = (contact.Name ?? string.Empty).Replace("\"", string.Empty, StringComparison.Ordinal).Trim();
+        var world = (contact.World ?? string.Empty).Replace("\"", string.Empty, StringComparison.Ordinal).Trim();
+        return string.IsNullOrWhiteSpace(world) ? name : $"{name}@{world}";
+    }
+}
