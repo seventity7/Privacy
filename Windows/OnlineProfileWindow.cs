@@ -7,7 +7,10 @@ using Privacy.Models;
 using Privacy.Services;
 using Privacy.UI;
 using System;
+using System.Linq;
 using System.Numerics;
+using System.IO;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -17,7 +20,10 @@ internal sealed class OnlineProfileWindow : Window
 {
     private readonly Configuration config;
     private readonly ProfileImageCache profileImages;
+    private readonly FfxivVenuesService ffxivVenuesService;
     private PrivateContact? contact;
+    private int venueCarouselOffset;
+    private readonly HashSet<string> pendingVenueImageDownloads = new(StringComparer.OrdinalIgnoreCase);
     private string activeAvatarContactId = string.Empty;
     private string activeAvatarUrl = string.Empty;
     private string activeAvatarVersion = string.Empty;
@@ -25,11 +31,12 @@ internal sealed class OnlineProfileWindow : Window
     private int pushedColorCount;
     private int pushedStyleVarCount;
 
-    public OnlineProfileWindow(Configuration config, ProfileImageCache profileImages)
+    public OnlineProfileWindow(Configuration config, ProfileImageCache profileImages, FfxivVenuesService ffxivVenuesService)
         : base("Online Profile###PrivacyOnlineProfile")
     {
         this.config = config;
         this.profileImages = profileImages;
+        this.ffxivVenuesService = ffxivVenuesService;
         Size = new Vector2(460f, 430f);
         SizeCondition = ImGuiCond.FirstUseEver;
 
@@ -92,7 +99,6 @@ internal sealed class OnlineProfileWindow : Window
     public override void Draw()
     {
         WindowEdgeFade.DrawUnified(config.WindowBackgroundColor, config.AccentColor);
-        DrawHeader();
 
         using var body = ImRaii.Child("online-profile-body", new Vector2(-1f, -1f), false);
         if (!body) return;
@@ -133,19 +139,30 @@ internal sealed class OnlineProfileWindow : Window
 
         DrawProfileOverlay(drawList, profile, contentWidth, scale);
 
+        DrawLowerContentDecor(drawList, contentWidth, scale);
         ImGui.Spacing();
-        DrawSection("Status", string.IsNullOrWhiteSpace(profile.CloudStatusMessage) ? "No status message set." : profile.CloudStatusMessage);
+        DrawOnlineFavoriteVenues(profile);
+        DrawSection("Status", string.IsNullOrWhiteSpace(profile.CloudStatusMessage) ? "No status message set." : profile.CloudStatusMessage, ResolveStatusMessageColor(profile));
         DrawSection("Bio", string.IsNullOrWhiteSpace(profile.CloudBio) ? "No bio set." : profile.CloudBio);
 
         ImGui.TextColored(config.AccentColor, "Location");
-        ImGui.TextDisabled(string.IsNullOrWhiteSpace(profile.DisplayLocation) ? "Unknown location." : profile.DisplayLocation);
-        if (!string.IsNullOrWhiteSpace(profile.ResidentialDetails))
-            ImGui.TextDisabled(profile.ResidentialDetails);
+        ImGui.TextDisabled(string.IsNullOrWhiteSpace(profile.DisplayLocation) ? "Unknown location." : FormatProfileLocation(profile.DisplayLocation));
 
         ImGui.Spacing();
         ImGui.TextDisabled(profile.CloudLastSyncedAt == DateTimeOffset.MinValue
             ? "Cloud profile has not been synced recently."
             : $"Last synced: {profile.CloudLastSyncedAt.LocalDateTime:g}");
+    }
+
+    private static string FormatProfileLocation(string text)
+    {
+        var value = (text ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+        value = value.Replace(" / ", ", ", StringComparison.Ordinal).Replace(" - ", ", ", StringComparison.Ordinal);
+        while (value.Contains(", ,", StringComparison.Ordinal))
+            value = value.Replace(", ,", ",", StringComparison.Ordinal);
+        return value;
     }
 
     private void DrawProfileOverlay(ImDrawListPtr drawList, PrivateContact profile, float contentWidth, float scale)
@@ -181,8 +198,8 @@ internal sealed class OnlineProfileWindow : Window
         var textWidth = MathF.Max(40f * scale, textMax.X - textMin.X);
         var displayName = profile.CloudDisplayName.Length > 0 ? profile.CloudDisplayName : profile.DisplayName;
         var identity = string.IsNullOrWhiteSpace(profile.World) ? profile.Name : $"{profile.Name}@{profile.World}";
-        var statusText = profile.Status == ContactStatus.Offline ? "Offline" : "Online";
-        var statusColor = profile.Status == ContactStatus.Offline ? UiColors.Offline : UiColors.Online;
+        var statusText = GetStatusDisplayName(profile.Status);
+        var statusColor = GetStatusColor(profile.Status);
 
         drawList.PushClipRect(textMin - new Vector2(1f, 1f) * scale, textMax, true);
         DrawTextWithShadow(drawList, textMin, ImGui.GetColorU32(UiColors.Text), TrimToWidth(displayName, textWidth, 15.2f * scale), 15.2f * scale);
@@ -194,6 +211,283 @@ internal sealed class OnlineProfileWindow : Window
 
         ImGui.Dummy(new Vector2(contentWidth, size.Y + 8f * scale));
     }
+
+    private void DrawLowerContentDecor(ImDrawListPtr drawList, float contentWidth, float scale)
+    {
+        var cursor = ImGui.GetCursorScreenPos();
+        var protrude = 6f * scale;
+        var pos = cursor + new Vector2(-protrude, -2f * scale);
+        var bottom = ImGui.GetWindowPos().Y + ImGui.GetWindowSize().Y - ImGui.GetStyle().WindowPadding.Y;
+        var height = MathF.Max(110f * scale, bottom - pos.Y);
+        var size = new Vector2(contentWidth + protrude * 2f, height);
+
+        drawList.PushClipRect(pos, pos + size, true);
+        HeaderDecor.Draw(drawList, pos, size.X, size.Y, config.WindowBackgroundColor, config.AccentColor);
+        drawList.PopClipRect();
+    }
+
+    private void DrawOnlineFavoriteVenues(PrivateContact profile)
+    {
+        var venues = (profile.CloudVenues ?? new List<PrivateVenueBookmark>())
+            .Where(v => v.Favorite && !string.IsNullOrWhiteSpace(v.Name))
+            .ToList();
+        if (venues.Count == 0)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        ImGui.TextColored(config.AccentColor, "Favorite Venues");
+        foreach (var venue in venues)
+            EnsureVenueBookmarkMetadata(venue);
+
+        var imageSize = 62f * scale;
+        var spacing = 10f * scale;
+        var arrowWidth = 24f * scale;
+        var available = ImGui.GetContentRegionAvail().X;
+        var visible = Math.Max(1, (int)((available - arrowWidth * 2f - spacing * 2f) / (imageSize + spacing)));
+        visible = Math.Min(visible, venues.Count);
+        var stripWidth = visible * imageSize + Math.Max(0, visible - 1) * spacing;
+        var totalWidth = arrowWidth * 2f + spacing * 2f + stripWidth;
+        var startX = ImGui.GetCursorScreenPos().X + MathF.Max(0f, (available - totalWidth) * 0.5f);
+        var y = ImGui.GetCursorScreenPos().Y;
+        var drawList = ImGui.GetWindowDrawList();
+        venueCarouselOffset = NormalizeCarouselOffset(venueCarouselOffset, venues.Count);
+
+        ImGui.SetCursorScreenPos(new Vector2(startX, y + (imageSize - 18f * scale) * 0.5f));
+        DrawCarouselArrow("online_venues_left", FontAwesomeIcon.ChevronLeft.ToIconString(), arrowWidth, () => venueCarouselOffset = NormalizeCarouselOffset(venueCarouselOffset - 1, venues.Count));
+
+        ImGui.SameLine(0f, spacing);
+        ImGui.SetCursorScreenPos(new Vector2(startX + arrowWidth + spacing, y));
+        for (var i = 0; i < visible; i++)
+        {
+            var venue = venues[(venueCarouselOffset + i) % venues.Count];
+            var pos = ImGui.GetCursorScreenPos();
+            var texture = ResolveVenueTexture(venue);
+            drawList.AddRectFilled(pos, pos + new Vector2(imageSize), ImGui.GetColorU32(UiColors.WithAlpha(config.WindowBackgroundColor, 0.48f)), 5f * scale);
+            if (texture != null)
+                drawList.AddImageRounded(texture.Handle, pos, pos + new Vector2(imageSize), Vector2.Zero, Vector2.One, ImGui.GetColorU32(Vector4.One), 5f * scale);
+            else
+                DrawTextWithShadow(drawList, pos + new Vector2(22f, 20f) * scale, ImGui.GetColorU32(UiColors.TextDim), "?", 18f * scale);
+            drawList.AddRect(pos, pos + new Vector2(imageSize), ImGui.GetColorU32(UiColors.WithAlpha(config.AccentColor, 0.36f)), 5f * scale, ImDrawFlags.None, 1f * scale);
+
+            ImGui.InvisibleButton($"online_favorite_venue_{venue.Name}_{i}", new Vector2(imageSize));
+            if (ImGui.IsItemHovered())
+                DrawFavoriteVenueTooltip(venue);
+            if (ImGui.BeginPopupContextItem($"online_favorite_venue_context_{i}"))
+            {
+                if (ImGui.MenuItem("Add venue to your list"))
+                    AddVenueToLocalList(venue);
+                ImGui.EndPopup();
+            }
+
+            if (i < visible - 1)
+                ImGui.SameLine(0f, spacing);
+        }
+
+        ImGui.SameLine(0f, spacing);
+        ImGui.SetCursorScreenPos(new Vector2(startX + arrowWidth + spacing + stripWidth + spacing, y + (imageSize - 18f * scale) * 0.5f));
+        DrawCarouselArrow("online_venues_right", FontAwesomeIcon.ChevronRight.ToIconString(), arrowWidth, () => venueCarouselOffset = NormalizeCarouselOffset(venueCarouselOffset + 1, venues.Count));
+
+        ImGui.SetCursorScreenPos(new Vector2(ImGui.GetCursorScreenPos().X, y + imageSize + 7f * scale));
+        ImGui.Dummy(new Vector2(1f, 1f));
+        ImGui.Spacing();
+    }
+
+    private void DrawCarouselArrow(string id, string icon, float width, Action action)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var pos = ImGui.GetCursorScreenPos();
+        var size = new Vector2(width, 20f * scale);
+        ImGui.InvisibleButton(id, size);
+        var hovered = ImGui.IsItemHovered();
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Left))
+            action();
+
+        var drawList = ImGui.GetWindowDrawList();
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var fontSize = 15.5f * scale;
+            var textSize = ImGui.CalcTextSize(icon) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            var color = hovered ? config.AccentColor : UiColors.WithAlpha(config.AccentColor, 0.78f);
+            drawList.AddText(UiBuilder.IconFont, fontSize, pos + (size - textSize) * 0.5f, ImGui.GetColorU32(color), icon);
+        }
+    }
+
+    private void AddVenueToLocalList(PrivateVenueBookmark venue)
+    {
+        var existing = config.Venues.FirstOrDefault(v => string.Equals(v.Name, venue.Name, StringComparison.OrdinalIgnoreCase));
+        if (existing != null)
+            return;
+
+        var contact = new PrivateContact
+        {
+            Name = venue.Name,
+            DataCenter = venue.DataCenter,
+            CurrentDataCenter = venue.DataCenter,
+            World = venue.World,
+            CurrentWorld = venue.World,
+            LastKnownZone = venue.BuildAddress(),
+            ResidentialDetails = BuildVenueResidentialDetails(venue),
+            VenueColorHex = config.CloudProfileStatusColorHex,
+            VenueTeleportCommand = venue.BuildTeleportCommand(),
+            VenueDiscordUrl = venue.DiscordUrl,
+            ProfileImagePath = venue.ImageLocalPath,
+            CloudAvatarUrl = venue.ImageUrl,
+            CloudManagedProfileImage = !string.IsNullOrWhiteSpace(venue.ImageLocalPath),
+            Status = ContactStatus.Online,
+            AddedAt = DateTimeOffset.UtcNow,
+        };
+        config.Venues.Add(contact);
+        config.Save();
+    }
+
+    private static string BuildVenueResidentialDetails(PrivateVenueBookmark venue)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(venue.District)) parts.Add(venue.District);
+        if (venue.Ward > 0) parts.Add($"w{venue.Ward}");
+        if (venue.Plot > 0) parts.Add($"p{venue.Plot}");
+        return string.Join(" - ", parts);
+    }
+
+    private void EnsureVenueBookmarkMetadata(PrivateVenueBookmark venue)
+    {
+        var catalog = ffxivVenuesService.FindByName(venue.Name);
+        if (catalog == null)
+            return;
+
+        var changed = false;
+        if (string.IsNullOrWhiteSpace(venue.ImageUrl) && !string.IsNullOrWhiteSpace(catalog.ImageUrl)) { venue.ImageUrl = catalog.ImageUrl; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.TeleportCommand) && !string.IsNullOrWhiteSpace(catalog.TeleportCommand)) { venue.TeleportCommand = catalog.TeleportCommand; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.Address)) { venue.Address = catalog.BuildFullLocation(); changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.DataCenter)) { venue.DataCenter = catalog.DataCenter; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.World)) { venue.World = catalog.World; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.District)) { venue.District = catalog.District; changed = true; }
+        if (venue.Ward <= 0 && catalog.Ward > 0) { venue.Ward = catalog.Ward; changed = true; }
+        if (venue.Plot <= 0 && catalog.Plot > 0) { venue.Plot = catalog.Plot; changed = true; }
+
+        if (changed)
+            config.Save();
+    }
+
+
+    private void DrawFavoriteVenueTooltip(PrivateVenueBookmark venue)
+    {
+        ImGui.BeginTooltip();
+        ImGui.TextUnformatted(venue.Name);
+        var tag = SanitizeFavoriteVenueTag(venue.TooltipTag);
+        if (!string.IsNullOrWhiteSpace(tag))
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(UiColors.HexToRgba(NormalizeHex(venue.TooltipTagColorHex, "#B56CFF")), "#" + tag);
+        }
+        ImGui.TextUnformatted(BuildVenueTooltip(venue));
+        ImGui.EndTooltip();
+    }
+
+    private string BuildVenueTooltip(PrivateVenueBookmark venue)
+    {
+        EnsureVenueBookmarkMetadata(venue);
+        var location = venue.BuildAddress();
+        return string.IsNullOrWhiteSpace(location) ? "Unknown location" : location;
+    }
+
+    private Dalamud.Interface.Textures.TextureWraps.IDalamudTextureWrap? ResolveVenueTexture(PrivateVenueBookmark venue)
+    {
+        EnsureVenueBookmarkMetadata(venue);
+
+        if (!string.IsNullOrWhiteSpace(venue.ImageLocalPath))
+        {
+            var texture = profileImages.GetTexture(venue.ImageLocalPath);
+            if (texture != null)
+                return texture;
+
+            venue.ImageLocalPath = string.Empty;
+            config.Save();
+        }
+
+        if (!string.IsNullOrWhiteSpace(venue.ImageUrl))
+        {
+            var cacheKey = BuildVenueImageCacheKey(venue);
+            if (!pendingVenueImageDownloads.Add(cacheKey))
+                return null;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var path = await profileImages.DownloadRemoteVenueImageAsync(venue.ImageUrl, cacheKey, CancellationToken.None, venue.ImageUrl).ConfigureAwait(false);
+                    if (!string.IsNullOrWhiteSpace(path))
+                    {
+                        venue.ImageLocalPath = path;
+                        config.Save();
+                    }
+                }
+                finally
+                {
+                    pendingVenueImageDownloads.Remove(cacheKey);
+                }
+            });
+        }
+
+        return null;
+    }
+
+    private static string BuildVenueImageCacheKey(PrivateVenueBookmark venue)
+        => string.IsNullOrWhiteSpace(venue.Name) ? venue.ImageUrl : venue.Name + "_" + venue.World + "_" + venue.Ward + "_" + venue.Plot;
+
+
+    private static string BuildVenueTooltipTitle(PrivateVenueBookmark venue)
+    {
+        var tag = SanitizeFavoriteVenueTag(venue.TooltipTag);
+        return string.IsNullOrWhiteSpace(tag) ? venue.Name : $"{venue.Name} #{tag}";
+    }
+
+    private static string SanitizeFavoriteVenueTag(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        var chars = new List<char>();
+        foreach (var c in value)
+        {
+            if (char.IsLetterOrDigit(c))
+                chars.Add(c);
+        }
+
+        return new string(chars.ToArray());
+    }
+
+    private static int NormalizeCarouselOffset(int value, int count)
+    {
+        if (count <= 0)
+            return 0;
+        value %= count;
+        return value < 0 ? value + count : value;
+    }
+
+    private static Vector4 GetStatusColor(ContactStatus status)
+        => status switch
+        {
+            ContactStatus.Busy => UiColors.Busy,
+            ContactStatus.Idle => new Vector4(1.00f, 0.80f, 0.23f, 1f),
+            ContactStatus.Afk => new Vector4(1.00f, 0.34f, 0.34f, 1f),
+            ContactStatus.Content => new Vector4(0.18f, 0.88f, 1.00f, 1f),
+            ContactStatus.Streaming => new Vector4(0.78f, 0.56f, 1.00f, 1f),
+            ContactStatus.Online => UiColors.Online,
+            _ => UiColors.Offline,
+        };
+
+    private static string GetStatusDisplayName(ContactStatus status)
+        => status switch
+        {
+            ContactStatus.Afk => "AFK",
+            ContactStatus.Idle => "Idle",
+            ContactStatus.Busy => "Busy",
+            ContactStatus.Content => "Content",
+            ContactStatus.Streaming => "Streaming",
+            ContactStatus.Online => "Online",
+            _ => "Offline",
+        };
 
     private static void DrawDotOverlay(ImDrawListPtr drawList, Vector2 pos, Vector2 size, Vector4 color, float scale)
     {
@@ -231,11 +525,29 @@ internal sealed class OnlineProfileWindow : Window
         return ImGui.CalcTextSize(text).X * (fontSize / baseFontSize);
     }
 
-    private void DrawSection(string title, string text)
+    private void DrawSection(string title, string text, Vector4? textColor = null)
     {
         ImGui.TextColored(config.AccentColor, title);
-        ImGui.TextWrapped(text);
+        if (textColor.HasValue)
+            ImGui.TextColored(textColor.Value, text);
+        else
+            ImGui.TextWrapped(text);
         ImGui.Spacing();
+    }
+
+    private Vector4 ResolveStatusMessageColor(PrivateContact profile)
+        => UiColors.HexToRgba(NormalizeHex(profile.CloudStatusColorHex, "#2BE5B5"));
+
+    private static string NormalizeHex(string? value, string fallback)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (text.StartsWith('#'))
+            text = text[1..];
+
+        if (text.Length != 6 || text.Any(ch => !Uri.IsHexDigit(ch)))
+            return fallback;
+
+        return "#" + text.ToUpperInvariant();
     }
 
     private Dalamud.Interface.Textures.TextureWraps.IDalamudTextureWrap? GetCloudProfileTexture(PrivateContact profile)

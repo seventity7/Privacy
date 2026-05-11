@@ -34,6 +34,7 @@ internal sealed class SettingsWindow : Window
     private float bundledBackgroundCarouselOffset;
     private readonly List<string> bundledBackgroundImageCache = new();
     private bool bundledBackgroundImageCacheLoaded;
+    private double nextBundledBackgroundImageCacheRefreshAt;
     private int activeCarouselDirection;
     private double nextCarouselRepeatAt;
     private Vector2 bundledBackgroundLeftArrowMin;
@@ -109,19 +110,7 @@ var drawList = ImGui.GetWindowDrawList();
         var pos = ImGui.GetCursorScreenPos();
         var width = ImGui.GetContentRegionAvail().X;
         var headerHeight = 58f * ImGuiHelpers.GlobalScale;
-        var headerTop = new Vector4(
-            MathF.Min(1f, config.WindowBackgroundColor.X + 0.028f),
-            MathF.Min(1f, config.WindowBackgroundColor.Y + 0.028f),
-            MathF.Min(1f, config.WindowBackgroundColor.Z + 0.028f),
-            MathF.Min(1f, MathF.Max(0.38f, config.WindowBackgroundColor.W)));
-        var headerBottom = new Vector4(config.WindowBackgroundColor.X, config.WindowBackgroundColor.Y, config.WindowBackgroundColor.Z, 0f);
-        drawList.AddRectFilledMultiColor(
-            pos,
-            pos + new Vector2(width, headerHeight),
-            ImGui.GetColorU32(headerTop),
-            ImGui.GetColorU32(headerTop),
-            ImGui.GetColorU32(headerBottom),
-            ImGui.GetColorU32(headerBottom));
+        HeaderDecor.Draw(drawList, pos, width, headerHeight, config.WindowBackgroundColor, config.AccentColor);
         DrawTextWithShadow(drawList, pos + new Vector2(20f, 13f) * ImGuiHelpers.GlobalScale, ImGui.GetColorU32(config.AccentColor), "Privacy Settings", 20f * ImGuiHelpers.GlobalScale);
         ImGui.Dummy(new Vector2(width, headerHeight));
 
@@ -164,6 +153,9 @@ var drawList = ImGui.GetWindowDrawList();
             changed |= ImGui.Checkbox("Hide user row background", ref config.HideUserRowBackground);
             ImGui.SameLine();
             changed |= ImGui.Checkbox("Hide venues row background", ref config.HideVenuesRowBackground);
+            changed |= ImGui.Checkbox("Hide divisors", ref config.HideDivisors);
+            ImGui.SameLine();
+            changed |= ImGui.Checkbox("Hide venues divisor", ref config.HideVenuesDivisor);
 
             ImGui.TableNextColumn();
             changed |= DrawThemePresetButtons();
@@ -745,36 +737,53 @@ var drawList = ImGui.GetWindowDrawList();
 
     private List<string> GetBundledBackgroundImages()
     {
-        if (bundledBackgroundImageCacheLoaded)
+        var now = ImGui.GetTime();
+        if (bundledBackgroundImageCacheLoaded && now < nextBundledBackgroundImageCacheRefreshAt)
             return bundledBackgroundImageCache;
 
         bundledBackgroundImageCache.Clear();
         var extensions = GetSupportedBackgroundExtensions();
-        var images = new List<string>();
+        var imagesByFileName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var directory in GetBundledImageDirectories())
         {
             if (!Directory.Exists(directory))
                 continue;
 
-            images.AddRange(Directory.EnumerateFiles(directory)
-                .Where(path => extensions.Contains(Path.GetExtension(path))));
+            foreach (var path in Directory.EnumerateFiles(directory)
+                .Where(path => extensions.Contains(Path.GetExtension(path))))
+            {
+                AddCarouselImage(imagesByFileName, path);
+            }
         }
 
-        images.AddRange(ExtractEmbeddedBackgroundImages(extensions));
+        foreach (var path in ExtractEmbeddedBackgroundImages(extensions))
+            AddCarouselImage(imagesByFileName, path);
 
-        bundledBackgroundImageCache.AddRange(images
+        bundledBackgroundImageCache.AddRange(imagesByFileName.Values
             .Where(File.Exists)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase));
 
+        if (bundledBackgroundCarouselIndex >= bundledBackgroundImageCache.Count)
+            bundledBackgroundCarouselIndex = 0;
+
         bundledBackgroundImageCacheLoaded = true;
+        nextBundledBackgroundImageCacheRefreshAt = now + 2d;
         return bundledBackgroundImageCache;
+    }
+
+    private static void AddCarouselImage(Dictionary<string, string> imagesByFileName, string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            return;
+
+        imagesByFileName.TryAdd(Path.GetFileName(path), path);
     }
 
     private void InvalidateBundledBackgroundImageCache()
     {
         bundledBackgroundImageCacheLoaded = false;
+        nextBundledBackgroundImageCacheRefreshAt = 0d;
         bundledBackgroundImageCache.Clear();
     }
 
@@ -862,7 +871,7 @@ var drawList = ImGui.GetWindowDrawList();
             ("Gold", "All Gold", "#FFC845"),
             ("White", "White Gold", "#FFECA6"),
             ("Choc", "Chocolate", "#B57345"),
-            ("Cyber", "Cyberpunk", "#CF55FF"),
+            ("Cyber", "Cyberpunk", "#00EFFF"),
             ("Water", "Water", "#5EDBFF"),
             ("Fire", "Fire", "#FF872F"),
             ("Saku", "Sakura", "#FF9AC6"),
@@ -1146,11 +1155,11 @@ var drawList = ImGui.GetWindowDrawList();
             new Vector4(0.18f, 0.09f, 0.045f, 0.70f)));
 
         changed |= ThemePresetButton("Cyberpunk", buttonSize, () => ApplyThemePreset(
-            new Vector4(0.78f, 0.34f, 1.00f, 1f),
-            new Vector4(0.018f, 0.012f, 0.055f, 0.95f),
-            new Vector4(0.12f, 0.84f, 1.00f, 0.30f),
-            new Vector4(1.00f, 0.20f, 0.78f, 0.26f),
-            new Vector4(0.070f, 0.045f, 0.180f, 0.74f)));
+            new Vector4(0.00f, 0.94f, 1.00f, 1f),
+            new Vector4(0.012f, 0.014f, 0.018f, 0.96f),
+            new Vector4(0.030f, 0.036f, 0.046f, 0.88f),
+            new Vector4(0.020f, 0.024f, 0.032f, 0.86f),
+            new Vector4(0.032f, 0.038f, 0.046f, 0.78f)));
 
         ImGui.SameLine();
         changed |= ThemePresetButton("Water", buttonSize, () => ApplyThemePreset(
@@ -1240,7 +1249,7 @@ var drawList = ImGui.GetWindowDrawList();
             "All Gold" => new Vector4(1.00f, 0.78f, 0.27f, 1f),
             "White Gold" => new Vector4(1.00f, 0.84f, 0.34f, 1f),
             "Chocolate" => new Vector4(0.86f, 0.56f, 0.35f, 1f),
-            "Cyberpunk" => new Vector4(0.78f, 0.34f, 1.00f, 1f),
+            "Cyberpunk" => new Vector4(0.00f, 0.94f, 1.00f, 1f),
             "Water" => new Vector4(0.38f, 0.84f, 1.00f, 1f),
             "Fire" => new Vector4(1.00f, 0.56f, 0.20f, 1f),
             "Sakura" => new Vector4(1.00f, 0.60f, 0.80f, 1f),

@@ -8,6 +8,7 @@ using Privacy.Windows;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 
 namespace Privacy;
 
@@ -18,12 +19,14 @@ public sealed class Plugin : IDalamudPlugin
     private readonly IFramework framework;
     private readonly Configuration config;
     private readonly IChatGui chatGui;
+    private readonly IClientState clientState;
     private readonly WindowSystem windowSystem = new("Privacy");
     private readonly NativeCommandExecutor nativeCommands;
     private readonly PrivacyService privacyService;
     private readonly ProfileImageCache profileImages;
     private readonly GameIconCache gameIcons;
     private readonly FriendListService friendListService;
+    private readonly FfxivVenuesService ffxivVenuesService;
     private readonly PrivacyCloudService cloudService;
     private readonly LoginWindow loginWindow;
     private readonly MyProfileWindow myProfileWindow;
@@ -36,7 +39,11 @@ public sealed class Plugin : IDalamudPlugin
     private readonly PrivacyContextMenuService contextMenuService;
 
     private DateTime nextRuntimeRefresh = DateTime.MinValue;
-    private readonly Dictionary<string, bool> lastOnlineStates = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Models.ContactStatus> lastContactStatuses = new(StringComparer.Ordinal);
+    private bool seededStatusNotifications;
+    private bool wasLoggedIn;
+    private DateTime loginNotificationDueAt = DateTime.MinValue;
+    private bool pendingLoginNotifications;
     private bool sentLoginOnlineSummary;
 
     public Plugin(
@@ -56,15 +63,16 @@ public sealed class Plugin : IDalamudPlugin
         this.commandManager = commandManager;
         this.framework = framework;
         this.chatGui = chatGui;
+        this.clientState = clientState;
+        wasLoggedIn = clientState.IsLoggedIn;
 
         ConfigMigration.Run(pluginInterface);
 
         config = pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         config.Initialize(pluginInterface);
 
-        if (string.IsNullOrWhiteSpace(config.CloudApiBaseUrl) ||
-            string.Equals(config.CloudApiBaseUrl.Trim().TrimEnd('/'), "https://privacy-api.kkevinbhrain.workers.dev", StringComparison.OrdinalIgnoreCase))
-            config.CloudApiBaseUrl = "https://privatelist-api.kkevinbhrain.workers.dev";
+        if (string.IsNullOrWhiteSpace(config.CloudApiBaseUrl))
+            config.CloudApiBaseUrl = ResolveBundledCloudApiBaseUrl();
 
         config.CloudEnabled = true;
         config.CloudAutoSync = true;
@@ -76,15 +84,17 @@ public sealed class Plugin : IDalamudPlugin
         profileImages = new ProfileImageCache(pluginInterface, textureProvider, pluginLog);
         gameIcons = new GameIconCache(textureProvider, pluginLog);
         friendListService = new FriendListService(dataManager, pluginLog);
+        ffxivVenuesService = new FfxivVenuesService(pluginInterface, pluginLog);
+        ffxivVenuesService.EnsureFreshAsync();
         cloudService = new PrivacyCloudService(config, dataManager, clientState, objectTable, chatGui, pluginLog);
         loginWindow = new LoginWindow(config, cloudService);
-        myProfileWindow = new MyProfileWindow(config, cloudService, profileImages);
-        onlineProfileWindow = new OnlineProfileWindow(config, profileImages);
+        myProfileWindow = new MyProfileWindow(config, cloudService, profileImages, ffxivVenuesService, dataManager, clientState);
+        onlineProfileWindow = new OnlineProfileWindow(config, profileImages, ffxivVenuesService);
         notesWindow = new NotesWindow(config, pluginLog);
         settingsWindow = new SettingsWindow(config, profileImages, pluginInterface);
         estateTeleportWindow = new EstateTeleportWindow(config, privacyService, nativeCommands, pluginLog);
         contactProfileWindow = new ContactProfileWindow(config, pluginLog);
-        privacyWindow = new PrivacyWindow(config, privacyService, nativeCommands, profileImages, gameIcons, friendListService, pluginLog, notesWindow, settingsWindow, estateTeleportWindow, contactProfileWindow, loginWindow, myProfileWindow, onlineProfileWindow);
+        privacyWindow = new PrivacyWindow(config, privacyService, nativeCommands, profileImages, gameIcons, friendListService, ffxivVenuesService, pluginLog, notesWindow, settingsWindow, estateTeleportWindow, contactProfileWindow, loginWindow, myProfileWindow, onlineProfileWindow);
 
         windowSystem.AddWindow(privacyWindow);
         windowSystem.AddWindow(loginWindow);
@@ -108,6 +118,15 @@ public sealed class Plugin : IDalamudPlugin
         framework.Update += OnFrameworkUpdate;
     }
 
+    private static string ResolveBundledCloudApiBaseUrl()
+    {
+        return Assembly.GetExecutingAssembly()
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(attribute => string.Equals(attribute.Key, "PrivacyCloudApiBaseUrl", StringComparison.Ordinal))
+            ?.Value
+            ?.Trim() ?? string.Empty;
+    }
+
     public void Dispose()
     {
         framework.Update -= OnFrameworkUpdate;
@@ -122,6 +141,7 @@ public sealed class Plugin : IDalamudPlugin
 
         contextMenuService.Dispose();
         cloudService.Dispose();
+        ffxivVenuesService.Dispose();
         profileImages.Dispose();
         gameIcons.Dispose();
         privacyWindow.Dispose();
@@ -170,6 +190,14 @@ public sealed class Plugin : IDalamudPlugin
 
     private void ProcessStatusNotifications()
     {
+        var isLoggedIn = clientState.IsLoggedIn;
+        if (!wasLoggedIn && isLoggedIn)
+        {
+            pendingLoginNotifications = true;
+            loginNotificationDueAt = DateTime.UtcNow.AddSeconds(8);
+        }
+        wasLoggedIn = isLoggedIn;
+
         if (!sentLoginOnlineSummary)
         {
             sentLoginOnlineSummary = true;
@@ -179,35 +207,47 @@ public sealed class Plugin : IDalamudPlugin
                 var onlineCount = config.Contacts.Count(IsOnline);
                 chatGui.Print($"[Privacy] {onlineCount} Contacts Online now!");
             }
+        }
 
+        if (!seededStatusNotifications)
+        {
+            seededStatusNotifications = true;
             foreach (var contact in config.Contacts)
-                lastOnlineStates[contact.Id] = IsOnline(contact);
-
+                lastContactStatuses[contact.Id] = contact.Status;
             return;
+        }
+
+        if (pendingLoginNotifications && DateTime.UtcNow >= loginNotificationDueAt)
+        {
+            pendingLoginNotifications = false;
+            foreach (var contact in config.Contacts.Where(contact => ShouldNotify(contact) && IsOnline(contact)))
+                chatGui.Print($"[Privacy] {contact.DisplayName} is {GetStatusDisplayName(contact.Status)}.");
         }
 
         foreach (var contact in config.Contacts.ToList())
         {
-            var online = IsOnline(contact);
-            if (!lastOnlineStates.TryGetValue(contact.Id, out var previousOnline))
+            var currentStatus = contact.Status;
+            if (!lastContactStatuses.TryGetValue(contact.Id, out var previousStatus))
             {
-                lastOnlineStates[contact.Id] = online;
+                lastContactStatuses[contact.Id] = currentStatus;
                 continue;
             }
 
-            if (previousOnline == online) continue;
+            if (previousStatus == currentStatus)
+                continue;
 
-            lastOnlineStates[contact.Id] = online;
-            if (!ShouldNotify(contact)) continue;
+            lastContactStatuses[contact.Id] = currentStatus;
+            if (!ShouldNotify(contact))
+                continue;
 
-            chatGui.Print(online
-                ? $"[Privacy] {contact.DisplayName} is now Online!"
-                : $"[Privacy] {contact.DisplayName} is now Offline.");
+            chatGui.Print(currentStatus == Models.ContactStatus.Offline
+                ? $"[Privacy] {contact.DisplayName} is now Offline."
+                : $"[Privacy] {contact.DisplayName} is now {GetStatusDisplayName(currentStatus)}.");
         }
 
         var validIds = config.Contacts.Select(c => c.Id).ToHashSet(StringComparer.Ordinal);
-        foreach (var staleId in lastOnlineStates.Keys.Where(id => !validIds.Contains(id)).ToList())
-            lastOnlineStates.Remove(staleId);
+        foreach (var staleId in lastContactStatuses.Keys.Where(id => !validIds.Contains(id)).ToList())
+            lastContactStatuses.Remove(staleId);
     }
 
     private bool ShouldNotify(Models.PrivateContact contact)
@@ -228,4 +268,16 @@ public sealed class Plugin : IDalamudPlugin
 
     private static bool IsOnline(Models.PrivateContact contact)
         => contact.Status != Models.ContactStatus.Offline;
+
+    private static string GetStatusDisplayName(Models.ContactStatus status)
+        => status switch
+        {
+            Models.ContactStatus.Afk => "AFK",
+            Models.ContactStatus.Idle => "Idle",
+            Models.ContactStatus.Busy => "Busy",
+            Models.ContactStatus.Content => "Content",
+            Models.ContactStatus.Streaming => "Streaming",
+            Models.ContactStatus.Online => "Online",
+            _ => "Offline",
+        };
 }

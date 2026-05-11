@@ -17,6 +17,7 @@ public sealed class CloudProfileSnapshot
     public string Tag { get; set; } = string.Empty;
     public string TagColorHex { get; set; } = string.Empty;
     public string StatusMessage { get; set; } = string.Empty;
+    public string StatusColorHex { get; set; } = "#2BE5B5";
     public List<PrivateVenueBookmark> Venues { get; set; } = new();
     public ContactStatus Status { get; set; } = ContactStatus.Offline;
     public string CurrentDataCenter { get; set; } = string.Empty;

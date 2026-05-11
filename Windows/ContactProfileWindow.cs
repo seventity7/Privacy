@@ -124,21 +124,7 @@ var drawList = ImGui.GetWindowDrawList();
         var headerPos = ImGui.GetCursorScreenPos();
         var width = ImGui.GetContentRegionAvail().X;
         var headerHeight = 58f * ImGuiHelpers.GlobalScale;
-
-        var headerTop = new Vector4(
-            MathF.Min(1f, config.WindowBackgroundColor.X + 0.028f),
-            MathF.Min(1f, config.WindowBackgroundColor.Y + 0.028f),
-            MathF.Min(1f, config.WindowBackgroundColor.Z + 0.028f),
-            MathF.Min(1f, MathF.Max(0.38f, config.WindowBackgroundColor.W)));
-        var headerBottom = new Vector4(config.WindowBackgroundColor.X, config.WindowBackgroundColor.Y, config.WindowBackgroundColor.Z, 0f);
-
-        drawList.AddRectFilledMultiColor(
-            headerPos,
-            headerPos + new Vector2(width, headerHeight),
-            ImGui.GetColorU32(headerTop),
-            ImGui.GetColorU32(headerTop),
-            ImGui.GetColorU32(headerBottom),
-            ImGui.GetColorU32(headerBottom));
+        HeaderDecor.Draw(drawList, headerPos, width, headerHeight, config.WindowBackgroundColor, config.AccentColor);
 
         var title = contact == null ? "Contact Profile" : $"Profile - {contact.DisplayName}";
         DrawTextWithShadow(drawList, headerPos + new Vector2(20f, 13f) * ImGuiHelpers.GlobalScale, ImGui.GetColorU32(config.AccentColor), title, 20f * ImGuiHelpers.GlobalScale);

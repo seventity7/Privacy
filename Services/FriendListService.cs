@@ -103,19 +103,26 @@ internal sealed unsafe class FriendListService
     {
         if (string.IsNullOrWhiteSpace(zoneName)) return string.Empty;
 
-        var district = ExtractResidentialDistrict(zoneName);
-        if (string.IsNullOrWhiteSpace(district)) return string.Empty;
-
         var housingNumbers = ExtractHousingNumbers(zoneName);
-        return string.IsNullOrWhiteSpace(housingNumbers)
-            ? $"Residential District: {district}"
-            : $"Residential District: {district} - {housingNumbers}";
+        var district = ExtractResidentialDistrict(zoneName);
+
+        if (string.IsNullOrWhiteSpace(district))
+            return housingNumbers;
+
+        if (string.IsNullOrWhiteSpace(housingNumbers))
+            return string.Empty;
+
+        return $"{district} - {housingNumbers}";
     }
 
     private static string ExtractHousingNumbers(string zoneName)
     {
         var ward = ExtractNumberAfter(zoneName, "Ward");
+        if (string.IsNullOrWhiteSpace(ward)) ward = ExtractNumberAfter(zoneName, "w");
+
         var plot = ExtractNumberAfter(zoneName, "Plot");
+        if (string.IsNullOrWhiteSpace(plot)) plot = ExtractNumberAfter(zoneName, "p");
+
         if (!string.IsNullOrWhiteSpace(ward) && !string.IsNullOrWhiteSpace(plot)) return $"w{ward} - p{plot}";
         if (!string.IsNullOrWhiteSpace(ward)) return $"w{ward}";
         if (!string.IsNullOrWhiteSpace(plot)) return $"p{plot}";
@@ -124,19 +131,50 @@ internal sealed unsafe class FriendListService
 
     private static string ExtractNumberAfter(string text, string marker)
     {
-        var index = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-        if (index < 0) return string.Empty;
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(marker)) return string.Empty;
 
-        index += marker.Length;
-        while (index < text.Length && !char.IsDigit(text[index])) index++;
-        var start = index;
-        while (index < text.Length && char.IsDigit(text[index])) index++;
-        return index > start ? text[start..index] : string.Empty;
+        var comparison = StringComparison.OrdinalIgnoreCase;
+        var index = -1;
+        while (true)
+        {
+            index = text.IndexOf(marker, index + 1, comparison);
+            if (index < 0) return string.Empty;
+
+            var isShortMarker = marker.Length == 1;
+            var validPrefix = !isShortMarker || index == 0 || !char.IsLetterOrDigit(text[index - 1]);
+            if (!validPrefix)
+                continue;
+
+            var numberStart = index + marker.Length;
+            while (numberStart < text.Length && !char.IsDigit(text[numberStart]))
+                numberStart++;
+
+            if (numberStart >= text.Length)
+                continue;
+
+            var numberEnd = numberStart;
+            while (numberEnd < text.Length && char.IsDigit(text[numberEnd]))
+                numberEnd++;
+
+            return text[numberStart..numberEnd];
+        }
     }
 
     private static string ExtractResidentialDistrict(string zoneName)
     {
         var text = zoneName.Trim();
+
+        if (text.Contains("Mist", StringComparison.OrdinalIgnoreCase)) return "Mist";
+        if (text.Contains("Lavender", StringComparison.OrdinalIgnoreCase) || text.Contains("Lavander", StringComparison.OrdinalIgnoreCase)) return "Lavender Beds";
+        if (text.Contains("Goblet", StringComparison.OrdinalIgnoreCase)) return "Goblet";
+        if (text.Contains("Shirogane", StringComparison.OrdinalIgnoreCase)) return "Shirogane";
+        if (text.Contains("Empyreum", StringComparison.OrdinalIgnoreCase)) return "Empyreum";
+
+        if (!text.Contains("House", StringComparison.OrdinalIgnoreCase) &&
+            !text.Contains("Estate", StringComparison.OrdinalIgnoreCase) &&
+            !text.Contains("Apartment", StringComparison.OrdinalIgnoreCase))
+            return string.Empty;
+
         var separators = new[] { " - ", ": " };
         foreach (var separator in separators)
         {
@@ -145,11 +183,7 @@ internal sealed unsafe class FriendListService
                 return text[(index + separator.Length)..].Trim();
         }
 
-        return text.Contains("House", StringComparison.OrdinalIgnoreCase) ||
-               text.Contains("Estate", StringComparison.OrdinalIgnoreCase) ||
-               text.Contains("Apartment", StringComparison.OrdinalIgnoreCase)
-            ? text
-            : string.Empty;
+        return text;
     }
 
     private string ResolveWorldName(uint worldId)

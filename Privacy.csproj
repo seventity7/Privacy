@@ -2,7 +2,7 @@
   <PropertyGroup>
     <Authors>Bryer</Authors>
     <Company>Bryer</Company>
-    <Version>1.0.2.2</Version>
+    <Version>1.0.2.3</Version>
     <Description>Private contact list for FFXIV.</Description>
     <AssemblyName>Privacy</AssemblyName>
     <TargetFramework>net10.0-windows7.0</TargetFramework>
@@ -16,6 +16,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <PrivacyCloudApiBaseUrl Condition="'$(PrivacyCloudApiBaseUrl)' == ''">$(PRIVACY_CLOUD_API_BASE_URL)</PrivacyCloudApiBaseUrl>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(PrivacyCloudApiBaseUrl)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>PrivacyCloudApiBaseUrl</_Parameter1>
+      <_Parameter2>$(PrivacyCloudApiBaseUrl)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
     <PackageReference Update="DalamudPackager" Version="15.0.0" />
@@ -25,10 +36,10 @@
   <None Update="icon.png">
     <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
   </None>
-  <None Update="images\**\*">
+  <Content Include="images\**\*">
     <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-  </None>
+  </Content>
   <EmbeddedResource Include="images\**\*" />
 </ItemGroup>
 </Project>
