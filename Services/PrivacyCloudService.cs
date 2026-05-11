@@ -867,6 +867,7 @@ internal sealed class PrivacyCloudService : IDisposable
                         CharacterName = result.CharacterName ?? string.Empty,
                         HomeWorld = result.HomeWorldName ?? string.Empty,
                         HomeWorldId = result.HomeWorldId,
+                        ContentId = ParseUlong(result.ContentId),
                         DisplayName = result.Profile?.DisplayName ?? string.Empty,
                         AvatarUrl = result.Profile?.AvatarUrl ?? string.Empty,
                         Bio = result.Profile?.Bio ?? string.Empty,
@@ -892,6 +893,9 @@ internal sealed class PrivacyCloudService : IDisposable
 
         private static DateTimeOffset ParseDate(string? value)
             => DateTimeOffset.TryParse(value, out var parsed) ? parsed : DateTimeOffset.MinValue;
+
+        private static ulong ParseUlong(string? value)
+            => ulong.TryParse(value, out var parsed) ? parsed : 0UL;
     }
 
     private sealed class CloudResolveResult
@@ -901,6 +905,7 @@ internal sealed class PrivacyCloudService : IDisposable
         public string? CharacterName { get; set; }
         public string? HomeWorldName { get; set; }
         public uint HomeWorldId { get; set; }
+        public string? ContentId { get; set; }
         public CloudProfileDto? Profile { get; set; }
         public CloudPresenceDto? Presence { get; set; }
     }
