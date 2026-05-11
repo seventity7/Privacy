@@ -315,6 +315,15 @@ internal sealed class PrivacyCloudService : IDisposable
             character = identity,
             status = "Online",
             timestamp = DateTimeOffset.UtcNow,
+            profile = new
+            {
+                displayName = string.IsNullOrWhiteSpace(config.CloudProfileDisplayName) ? config.CloudDisplayName : config.CloudProfileDisplayName,
+                bio = config.CloudProfileBio,
+                statusMessage = config.CloudProfileStatusMessage,
+                avatarUrl = config.CloudProfileAvatarUrl,
+                tag = config.CloudProfileTag,
+                venues = config.CloudSavedVenues,
+            },
         }, cancellationToken).ConfigureAwait(false);
 
         if (response.Success)
@@ -470,13 +479,30 @@ internal sealed class PrivacyCloudService : IDisposable
 
         if (!string.IsNullOrWhiteSpace(profile.AvatarUrl))
         {
-            var storedPath = await profileImages.DownloadRemoteImageAsync(profile.AvatarUrl, contact.Id, cancellationToken).ConfigureAwait(false);
-            if (!string.IsNullOrWhiteSpace(storedPath))
+            var avatarVersion = BuildAvatarCacheVersion(profile);
+            if (!contact.CloudManagedProfileImage ||
+                string.IsNullOrWhiteSpace(contact.ProfileImagePath) ||
+                !profileImages.IsRemoteImageCurrent(contact.Id, profile.AvatarUrl, avatarVersion))
             {
-                contact.ProfileImagePath = storedPath;
-                contact.CloudManagedProfileImage = true;
+                var storedPath = await profileImages.DownloadRemoteImageAsync(profile.AvatarUrl, contact.Id, cancellationToken, avatarVersion).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(storedPath))
+                {
+                    contact.ProfileImagePath = storedPath;
+                    contact.CloudManagedProfileImage = true;
+                }
             }
         }
+    }
+
+    private static string BuildAvatarCacheVersion(CloudProfileSnapshot profile)
+    {
+        if (profile.ProfileUpdatedAt != DateTimeOffset.MinValue)
+            return profile.ProfileUpdatedAt.ToUnixTimeMilliseconds().ToString();
+
+        if (profile.UpdatedAt != DateTimeOffset.MinValue)
+            return profile.UpdatedAt.ToUnixTimeMilliseconds().ToString();
+
+        return profile.AvatarUrl;
     }
 
     private PrivateContact? FindMatchingContact(IReadOnlyList<PrivateContact> contacts, CloudProfileSnapshot profile)
@@ -882,10 +908,11 @@ internal sealed class PrivacyCloudService : IDisposable
                         ResidentialDetails = result.Presence?.ResidentialInfo ?? string.Empty,
                         LastSeenAt = ParseDate(result.Presence?.LastSeenAt),
                         UpdatedAt = ParseDate(result.Presence?.UpdatedAt),
+                        ProfileUpdatedAt = ParseDate(result.Profile?.UpdatedAt),
                     };
 
                     if (snapshot.UpdatedAt == DateTimeOffset.MinValue)
-                        snapshot.UpdatedAt = ParseDate(result.Profile?.UpdatedAt);
+                        snapshot.UpdatedAt = snapshot.ProfileUpdatedAt;
 
                     return snapshot;
                 });

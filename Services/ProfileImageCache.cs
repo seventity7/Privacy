@@ -143,7 +143,7 @@ internal sealed class ProfileImageCache : IDisposable
         }
     }
 
-    public async Task<string> DownloadRemoteImageAsync(string imageUrl, string cacheKey, CancellationToken cancellationToken = default)
+    public async Task<string> DownloadRemoteImageAsync(string imageUrl, string cacheKey, CancellationToken cancellationToken = default, string cacheVersion = "")
     {
         if (string.IsNullOrWhiteSpace(imageUrl))
             return string.Empty;
@@ -154,7 +154,8 @@ internal sealed class ProfileImageCache : IDisposable
 
         try
         {
-            using var response = await remoteHttpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            var requestUri = BuildCacheBustedUri(uri, cacheVersion);
+            using var response = await remoteHttpClient.GetAsync(requestUri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
                 return string.Empty;
 
@@ -183,6 +184,7 @@ internal sealed class ProfileImageCache : IDisposable
                 Invalidate(finalPath);
 
             File.Move(tempPath, finalPath, overwrite: true);
+            await File.WriteAllTextAsync(GetRemoteMarkerPath(safeKey), BuildRemoteMarker(imageUrl, cacheVersion), cancellationToken).ConfigureAwait(false);
             return finalPath;
         }
         catch (Exception ex)
@@ -217,6 +219,39 @@ internal sealed class ProfileImageCache : IDisposable
         if (!cache.Remove(path, out var texture)) return;
         texture.Dispose();
     }
+
+
+    public bool IsRemoteImageCurrent(string cacheKey, string imageUrl, string cacheVersion = "")
+    {
+        if (string.IsNullOrWhiteSpace(cacheKey) || string.IsNullOrWhiteSpace(imageUrl))
+            return false;
+
+        try
+        {
+            var markerPath = GetRemoteMarkerPath(SanitizeFileName(cacheKey));
+            return File.Exists(markerPath) &&
+                   string.Equals(File.ReadAllText(markerPath), BuildRemoteMarker(imageUrl, cacheVersion), StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static Uri BuildCacheBustedUri(Uri uri, string cacheVersion)
+    {
+        if (string.IsNullOrWhiteSpace(cacheVersion))
+            return uri;
+
+        var separator = string.IsNullOrEmpty(uri.Query) ? "?" : "&";
+        return new Uri(uri + separator + "privacyCache=" + Uri.EscapeDataString(cacheVersion));
+    }
+
+    private string GetRemoteMarkerPath(string safeKey)
+        => Path.Combine(ProfileImageDirectory, $"{safeKey}.cloud.url");
+
+    private static string BuildRemoteMarker(string imageUrl, string cacheVersion)
+        => string.IsNullOrWhiteSpace(cacheVersion) ? imageUrl.Trim() : $"{imageUrl.Trim()}|{cacheVersion.Trim()}";
 
 
     private static string ResolveImageExtension(string? mediaType, Uri uri)

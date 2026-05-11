@@ -2980,13 +2980,6 @@ internal sealed class PrivacyWindow : Window, IDisposable
         DrawTextWithShadow(drawList, locationPos, Color(UiColors.TextDim), FormatContactLocation(contact), 14.2f * scale);
         drawList.PopClipRect();
 
-        if (!config.MinimalMode && !string.IsNullOrWhiteSpace(contact.ResidentialDetails))
-        {
-            var residentialPos = new Vector2(pos.X, currentY + 16f * scale);
-            drawList.PushClipRect(residentialPos - new Vector2(0f, 1f * scale), new Vector2(residentialPos.X + safeWidth, residentialPos.Y + 17f * scale), true);
-            DrawTextWithShadow(drawList, residentialPos, Color(Alpha(UiColors.TextDim, 0.86f)), contact.ResidentialDetails, 13.7f * scale);
-            drawList.PopClipRect();
-        }
     }
 
     private void DrawNotebookContactTexts(PrivateContact contact, Vector2 pos, float width)
@@ -4897,9 +4890,66 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
     private string FormatContactLocation(PrivateContact contact)
     {
-        var location = contact.DisplayLocation;
+        var location = BuildLocationLine(contact);
         var venueName = ResolveVenueNameForContact(contact);
         return string.IsNullOrWhiteSpace(venueName) ? location : $"{location} @At {venueName}";
+    }
+
+    private static string BuildLocationLine(PrivateContact contact)
+    {
+        var parts = new List<string>();
+        AddLocationPart(parts, string.IsNullOrWhiteSpace(contact.CurrentDataCenter) ? contact.DataCenter : contact.CurrentDataCenter);
+        AddLocationPart(parts, string.IsNullOrWhiteSpace(contact.CurrentWorld) ? contact.World : contact.CurrentWorld);
+        AddLocationPart(parts, contact.LastKnownZone);
+
+        foreach (var part in NormalizeResidentialParts(contact.ResidentialDetails))
+            AddLocationPart(parts, part);
+
+        return parts.Count == 0 ? "Unknown location" : string.Join(" - ", parts);
+    }
+
+    private static void AddLocationPart(List<string> parts, string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return;
+
+        var normalized = value.Trim();
+        if (normalized.StartsWith("Unknown ", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        if (!parts.Any(existing => string.Equals(existing, normalized, StringComparison.OrdinalIgnoreCase)))
+            parts.Add(normalized);
+    }
+
+    private static IEnumerable<string> NormalizeResidentialParts(string residentialDetails)
+    {
+        if (string.IsNullOrWhiteSpace(residentialDetails))
+            yield break;
+
+        var cleaned = residentialDetails
+            .Replace("Residential District:", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace("Residential District", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Trim(' ', '-', ':');
+
+        foreach (var raw in cleaned.Split('-', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var normalized = NormalizeResidentialDisplayPart(raw);
+            if (!string.IsNullOrWhiteSpace(normalized))
+                yield return normalized;
+        }
+    }
+
+    private static string NormalizeResidentialDisplayPart(string value)
+    {
+        var text = value.Trim();
+        if (string.IsNullOrWhiteSpace(text))
+            return string.Empty;
+
+        text = text.Replace(",", " ", StringComparison.OrdinalIgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bWard\s+(\d+)\b", "w$1", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bPlot\s+(\d+)\b", "p$1", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
+        return text;
     }
 
     private string ResolveVenueNameForContact(PrivateContact contact)

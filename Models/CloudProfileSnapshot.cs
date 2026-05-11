@@ -26,4 +26,5 @@ public sealed class CloudProfileSnapshot
     public string ResidentialDetails { get; set; } = string.Empty;
     public DateTimeOffset LastSeenAt { get; set; } = DateTimeOffset.MinValue;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.MinValue;
+    public DateTimeOffset ProfileUpdatedAt { get; set; } = DateTimeOffset.MinValue;
 }
