@@ -49,8 +49,9 @@ internal sealed class PrivacyService
         var currentWorldId = targetPlayer != null ? GetPlayerCurrentWorldId(targetPlayer) : ResolveLocalCurrentWorldId();
         var currentWorld = ResolveWorldName(currentWorldId);
         var currentDataCenter = ResolveDataCenterName(currentWorldId);
-        var zone = ResolveCurrentZoneName();
-        var residentialDetails = BuildResidentialDetails(zone);
+        var location = ResolveCurrentLocation();
+        var zone = location.Zone;
+        var residentialDetails = location.ResidentialDetails;
         var status = targetPlayer != null ? ResolveStatus(targetPlayer) : ContactStatus.Online;
 
         contact = AddOrUpdate(target.TargetName, world, worldId, dataCenter, zone, status, currentWorld, currentWorldId, currentDataCenter);
@@ -168,7 +169,9 @@ internal sealed class PrivacyService
 
         try
         {
-            var currentZone = ResolveCurrentZoneName();
+            var currentLocation = ResolveCurrentLocation();
+            var currentZone = currentLocation.Zone;
+            var currentResidentialDetails = currentLocation.ResidentialDetails;
             var seen = config.Contacts.ToDictionary(c => c.Id, _ => false, StringComparer.Ordinal);
             var visibleInCurrentWorld = new HashSet<string>(StringComparer.Ordinal);
 
@@ -196,7 +199,9 @@ internal sealed class PrivacyService
                 if (!string.IsNullOrWhiteSpace(currentZone))
                 {
                     contact.LastKnownZone = currentZone;
-                    contact.ResidentialDetails = BuildResidentialDetails(currentZone);
+                    contact.ResidentialDetails = string.IsNullOrWhiteSpace(currentResidentialDetails)
+                        ? BuildResidentialDetails(currentZone)
+                        : currentResidentialDetails;
                 }
                 RecordStateChanges(contact, previousStatus, previousLocation);
                 seen[contact.Id] = true;
@@ -451,19 +456,26 @@ internal sealed class PrivacyService
     {
         if (string.IsNullOrWhiteSpace(zoneName)) return string.Empty;
 
-        var district = ExtractResidentialDistrict(zoneName);
-        if (string.IsNullOrWhiteSpace(district)) return string.Empty;
-
         var housingNumbers = ExtractHousingNumbers(zoneName);
-        return string.IsNullOrWhiteSpace(housingNumbers)
-            ? $"Residential District: {district}"
-            : $"Residential District: {district} - {housingNumbers}";
+        var district = ExtractResidentialDistrict(zoneName);
+
+        if (string.IsNullOrWhiteSpace(district))
+            return housingNumbers;
+
+        if (string.IsNullOrWhiteSpace(housingNumbers))
+            return string.Empty;
+
+        return $"{district} - {housingNumbers}";
     }
 
     private static string ExtractHousingNumbers(string zoneName)
     {
         var ward = ExtractNumberAfter(zoneName, "Ward");
+        if (string.IsNullOrWhiteSpace(ward)) ward = ExtractNumberAfter(zoneName, "w");
+
         var plot = ExtractNumberAfter(zoneName, "Plot");
+        if (string.IsNullOrWhiteSpace(plot)) plot = ExtractNumberAfter(zoneName, "p");
+
         if (!string.IsNullOrWhiteSpace(ward) && !string.IsNullOrWhiteSpace(plot)) return $"w{ward} - p{plot}";
         if (!string.IsNullOrWhiteSpace(ward)) return $"w{ward}";
         if (!string.IsNullOrWhiteSpace(plot)) return $"p{plot}";
@@ -472,19 +484,45 @@ internal sealed class PrivacyService
 
     private static string ExtractNumberAfter(string text, string marker)
     {
-        var index = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-        if (index < 0) return string.Empty;
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(marker)) return string.Empty;
 
-        index += marker.Length;
-        while (index < text.Length && !char.IsDigit(text[index])) index++;
-        var start = index;
-        while (index < text.Length && char.IsDigit(text[index])) index++;
-        return index > start ? text[start..index] : string.Empty;
+        var comparison = StringComparison.OrdinalIgnoreCase;
+        var index = -1;
+        while (true)
+        {
+            index = text.IndexOf(marker, index + 1, comparison);
+            if (index < 0) return string.Empty;
+
+            var isShortMarker = marker.Length == 1;
+            var validPrefix = !isShortMarker || index == 0 || !char.IsLetterOrDigit(text[index - 1]);
+            if (!validPrefix)
+                continue;
+
+            var numberStart = index + marker.Length;
+            while (numberStart < text.Length && !char.IsDigit(text[numberStart]))
+                numberStart++;
+
+            if (numberStart >= text.Length)
+                continue;
+
+            var numberEnd = numberStart;
+            while (numberEnd < text.Length && char.IsDigit(text[numberEnd]))
+                numberEnd++;
+
+            return text[numberStart..numberEnd];
+        }
     }
 
     private static string ExtractResidentialDistrict(string zoneName)
     {
         var text = zoneName.Trim();
+
+        if (text.Contains("Mist", StringComparison.OrdinalIgnoreCase)) return "Mist";
+        if (text.Contains("Lavender", StringComparison.OrdinalIgnoreCase) || text.Contains("Lavander", StringComparison.OrdinalIgnoreCase)) return "Lavender Beds";
+        if (text.Contains("Goblet", StringComparison.OrdinalIgnoreCase)) return "Goblet";
+        if (text.Contains("Shirogane", StringComparison.OrdinalIgnoreCase)) return "Shirogane";
+        if (text.Contains("Empyreum", StringComparison.OrdinalIgnoreCase)) return "Empyreum";
+
         if (!text.Contains("House", StringComparison.OrdinalIgnoreCase) &&
             !text.Contains("Estate", StringComparison.OrdinalIgnoreCase) &&
             !text.Contains("Apartment", StringComparison.OrdinalIgnoreCase))
@@ -502,17 +540,10 @@ internal sealed class PrivacyService
     }
 
     public string ResolveCurrentZoneName()
-    {
-        try
-        {
-            var territory = dataManager.GetExcelSheet<TerritoryType>().GetRow(clientState.TerritoryType);
-            return territory.PlaceName.Value.Name.ToString();
-        }
-        catch
-        {
-            return string.Empty;
-        }
-    }
+        => ResolveCurrentLocation().Zone;
+
+    private GameLocationSnapshot ResolveCurrentLocation()
+        => GameLocationResolver.GetCurrent(dataManager, clientState);
 
     private IPlayerCharacter? FindPlayerFromContext(MenuTargetDefault target)
     {

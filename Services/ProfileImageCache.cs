@@ -2,8 +2,10 @@ using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Png;
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -24,6 +26,9 @@ internal sealed class ProfileImageCache : IDisposable
     private readonly IPluginLog log;
     private static readonly HttpClient remoteHttpClient = new();
     private readonly Dictionary<string, IDalamudTextureWrap> cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> failedTexturePaths = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, DateTime> failedRemoteVenueImages = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> remoteVenueDownloadLocks = new(StringComparer.OrdinalIgnoreCase);
 
     public ProfileImageCache(IDalamudPluginInterface pluginInterface, ITextureProvider textureProvider, IPluginLog log)
     {
@@ -194,11 +199,108 @@ internal sealed class ProfileImageCache : IDisposable
         }
     }
 
+
+    public bool IsRemoteVenueImageTemporarilyFailed(string cacheKey)
+    {
+        if (string.IsNullOrWhiteSpace(cacheKey))
+            return false;
+
+        var safeKey = SanitizeFileName("venue_" + cacheKey);
+        return failedRemoteVenueImages.TryGetValue(safeKey, out var failedAt) && DateTime.UtcNow - failedAt < TimeSpan.FromHours(6);
+    }
+
+    public async Task<string> DownloadRemoteVenueImageAsync(string imageUrl, string cacheKey, CancellationToken cancellationToken = default, string cacheVersion = "")
+    {
+        if (string.IsNullOrWhiteSpace(imageUrl))
+            return string.Empty;
+
+        if (!Uri.TryCreate(imageUrl, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
+            return string.Empty;
+
+        var safeKey = SanitizeFileName("venue_" + cacheKey);
+        if (failedRemoteVenueImages.TryGetValue(safeKey, out var failedAt) && DateTime.UtcNow - failedAt < TimeSpan.FromHours(6))
+            return string.Empty;
+
+        var markerPath = GetRemoteMarkerPath(safeKey);
+        var downloadLock = remoteVenueDownloadLocks.GetOrAdd(safeKey, _ => new SemaphoreSlim(1, 1));
+        await downloadLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var existing = Directory.GetFiles(ProfileImageDirectory, $"{safeKey}.cloud.*").FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(existing) && File.Exists(existing) && File.Exists(markerPath))
+            {
+                var marker = await File.ReadAllTextAsync(markerPath, cancellationToken).ConfigureAwait(false);
+                if (string.Equals(marker, BuildRemoteMarker(imageUrl, cacheVersion), StringComparison.Ordinal))
+                    return existing;
+            }
+
+            var requestUri = BuildCacheBustedUri(uri, cacheVersion);
+            using var response = await remoteHttpClient.GetAsync(requestUri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+                return string.Empty;
+
+            var contentLength = response.Content.Headers.ContentLength;
+            if (contentLength is > 4L * 1024L * 1024L)
+                return string.Empty;
+
+            var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+            if (bytes.Length == 0 || bytes.Length > 4L * 1024L * 1024L)
+                return string.Empty;
+
+            await using var imageStream = new MemoryStream(bytes);
+            using var image = await Image.LoadAsync(imageStream, cancellationToken).ConfigureAwait(false);
+            if (image.Width <= 0 || image.Height <= 0 || image.Width > 4096 || image.Height > 4096)
+            {
+                failedRemoteVenueImages[safeKey] = DateTime.UtcNow;
+                return string.Empty;
+            }
+
+            foreach (var oldFile in Directory.GetFiles(ProfileImageDirectory, $"{safeKey}.cloud.*"))
+            {
+                Invalidate(oldFile);
+                TryDeleteFile(oldFile);
+            }
+
+            var tempPath = Path.Combine(ProfileImageDirectory, $"{safeKey}.{Guid.NewGuid():N}.remote.png");
+            var finalPath = Path.Combine(ProfileImageDirectory, $"{safeKey}.cloud.png");
+            await image.SaveAsPngAsync(tempPath, new PngEncoder(), cancellationToken).ConfigureAwait(false);
+
+            if (File.Exists(finalPath))
+                Invalidate(finalPath);
+
+            File.Move(tempPath, finalPath, overwrite: true);
+            await File.WriteAllTextAsync(markerPath, BuildRemoteMarker(imageUrl, cacheVersion), cancellationToken).ConfigureAwait(false);
+            failedRemoteVenueImages.TryRemove(safeKey, out _);
+            return finalPath;
+        }
+        catch (Exception ex)
+        {
+            failedRemoteVenueImages[safeKey] = DateTime.UtcNow;
+            if (!IsImageDecodeFailure(ex))
+                log.Debug(ex, "Failed to download remote venue image from {Url}", imageUrl);
+            return string.Empty;
+        }
+        finally
+        {
+            downloadLock.Release();
+        }
+    }
+
     public IDalamudTextureWrap? GetTexture(string path)
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
 
+        var fileName = Path.GetFileName(path);
+        if (fileName.StartsWith("venue_", StringComparison.OrdinalIgnoreCase) && fileName.Contains(".cloud.", StringComparison.OrdinalIgnoreCase) && !fileName.EndsWith(".cloud.png", StringComparison.OrdinalIgnoreCase))
+        {
+            failedTexturePaths.Add(path);
+            TryDeleteFile(path);
+            return null;
+        }
+
         if (cache.TryGetValue(path, out var existing)) return existing;
+        if (failedTexturePaths.Contains(path)) return null;
 
         try
         {
@@ -209,13 +311,21 @@ internal sealed class ProfileImageCache : IDisposable
         }
         catch (Exception ex)
         {
-            log.Warning(ex, "Failed to load profile texture from {Path}", path);
+            failedTexturePaths.Add(path);
+            if (Path.GetFileName(path).StartsWith("venue_", StringComparison.OrdinalIgnoreCase))
+            {
+                TryDeleteFile(path);
+                return null;
+            }
+
+            log.Debug(ex, "Failed to load profile texture from {Path}", path);
             return null;
         }
     }
 
     public void Invalidate(string path)
     {
+        failedTexturePaths.Remove(path);
         if (!cache.Remove(path, out var texture)) return;
         texture.Dispose();
     }
@@ -238,6 +348,20 @@ internal sealed class ProfileImageCache : IDisposable
         }
     }
 
+    private static bool IsImageDecodeFailure(Exception ex)
+    {
+        for (var current = ex; current != null; current = current.InnerException)
+        {
+            var name = current.GetType().Name;
+            if (name.Contains("UnknownImageFormat", StringComparison.OrdinalIgnoreCase) ||
+                name.Contains("InvalidImageContent", StringComparison.OrdinalIgnoreCase) ||
+                name.Contains("ImageFormat", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
     private static Uri BuildCacheBustedUri(Uri uri, string cacheVersion)
     {
         if (string.IsNullOrWhiteSpace(cacheVersion))
@@ -253,6 +377,18 @@ internal sealed class ProfileImageCache : IDisposable
     private static string BuildRemoteMarker(string imageUrl, string cacheVersion)
         => string.IsNullOrWhiteSpace(cacheVersion) ? imageUrl.Trim() : $"{imageUrl.Trim()}|{cacheVersion.Trim()}";
 
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                File.Delete(path);
+        }
+        catch
+        {
+        }
+    }
 
     private static string ResolveImageExtension(string? mediaType, Uri uri)
     {

@@ -13,6 +13,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Privacy.Windows;
 
@@ -35,7 +37,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private const float CompactSidebarToggleHorizontalInset = 4f;
     private const float CompactSidebarToggleRounding = 6f;
     private const float TopSummaryHeight = 32f;
-    private const float HeaderHeight = 42f;
+    private const float HeaderHeight = 50f;
     private const float CompactWarningBannerSpacing = 0f;
     private const float BottomNavigationHeight = 40f;
     private const float RowHeight = 92f;
@@ -47,6 +49,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private readonly ProfileImageCache profileImages;
     private readonly GameIconCache gameIcons;
     private readonly FriendListService friendListService;
+    private readonly FfxivVenuesService ffxivVenuesService;
     private readonly IPluginLog log;
     private readonly NotesWindow notesWindow;
     private readonly SettingsWindow settingsWindow;
@@ -82,6 +85,17 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private string newVenueNameBuffer = string.Empty;
     private string venueColorHexBuffer = "#2BE5B5";
     private Vector4 venuePickerColor = UiColors.HexToRgba("#2BE5B5");
+    private FfxivVenueEntry? selectedVenueSuggestion;
+    private bool venueSuggestionDropdownOpen;
+    private bool venueSuggestionDropdownHovered;
+    private bool venueRowsInputBlocked;
+    private float venueSuggestionScrollOffset;
+    private bool venueSuggestionLayoutReady;
+    private float venueSuggestionInputWidth;
+    private Vector2 venueSuggestionInputMin;
+    private Vector2 venueSuggestionInputMax;
+    private bool venueNameInputActive;
+    private bool venueNameInputFocused;
     private PrivateContact? editingVenueLocation;
     private string venueLocationBuffer = string.Empty;
     private PrivateContact? editingVenueTeleport;
@@ -92,10 +106,15 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private bool openVenueLocationPopup;
     private bool openVenueTeleportPopup;
     private bool openVenueColorPopup;
+    private PrivateContact? openingHoursVenue;
+    private bool openingHoursWindowOpen;
     private string lastImageError = string.Empty;
     private float windowContentWidth;
     private Vector2 windowClipMin;
     private Vector2 windowClipMax;
+    private Vector2 mainBackgroundMin;
+    private Vector2 mainBackgroundMax;
+    private bool hasMainBackgroundBounds;
     private Vector2 topSummaryPanelPos;
     private Vector2 topSummaryPanelSize;
     private bool topSummaryPanelCloseHovered;
@@ -133,6 +152,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         ProfileImageCache profileImages,
         GameIconCache gameIcons,
         FriendListService friendListService,
+        FfxivVenuesService ffxivVenuesService,
         IPluginLog log,
         NotesWindow notesWindow,
         SettingsWindow settingsWindow,
@@ -149,6 +169,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         this.profileImages = profileImages;
         this.gameIcons = gameIcons;
         this.friendListService = friendListService;
+        this.ffxivVenuesService = ffxivVenuesService;
         this.log = log;
         this.notesWindow = notesWindow;
         this.settingsWindow = settingsWindow;
@@ -243,6 +264,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var windowSize = ImGui.GetWindowSize();
         windowClipMin = windowPos - new Vector2(18f, 18f) * ImGuiHelpers.GlobalScale;
         windowClipMax = windowPos + windowSize + new Vector2(18f, 18f) * ImGuiHelpers.GlobalScale;
+        hasMainBackgroundBounds = false;
         DrawWindowChrome(drawList, windowPos, windowSize);
 
         windowContentWidth = GetWindowContentRegionWidth();
@@ -382,9 +404,13 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private void DrawWindowChrome(ImDrawListPtr drawList, Vector2 pos, Vector2 size)
     {
         var scale = ImGuiHelpers.GlobalScale;
-        var bodyTopOffset = config.HideTopBar ? 1f * scale : (TopSummaryHeight + 1f) * scale;
+        var contentTopOffset = MathF.Max(0f, ImGui.GetCursorScreenPos().Y - pos.Y);
+        var bodyTopOffset = config.HideTopBar ? 1f * scale : contentTopOffset + (TopSummaryHeight + 1f) * scale;
         var min = pos + new Vector2(1f * scale, bodyTopOffset);
         var max = pos + size - new Vector2(1f, 1f) * scale;
+        mainBackgroundMin = min;
+        mainBackgroundMax = max;
+        hasMainBackgroundBounds = max.X > min.X && max.Y > min.Y;
 
         if (max.Y <= min.Y)
             return;
@@ -412,16 +438,14 @@ internal sealed class PrivacyWindow : Window, IDisposable
         if (texture == null)
             return false;
 
-        var imageSize = new Vector2(577f, 697f);
         var imageMin = min;
-        var imageMax = imageMin + imageSize;
+        var imageMax = max;
+        var imageSize = imageMax - imageMin;
 
         drawList.PushClipRect(min, max, true);
         drawList.AddRectFilled(min, max, Color(config.WindowBackgroundColor), 7f * scale);
-        drawList.AddImageRounded(texture.Handle, imageMin, imageMax, Vector2.Zero, Vector2.One, ImGui.GetColorU32(Vector4.One), 7f * scale);
-
-        // Overlay always uses the same exact 577x697 rect as the image.
-        drawList.AddRectFilled(imageMin, imageMax, ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.42f)), 7f * scale);
+        var backgroundTint = new Vector4(0.50f, 0.50f, 0.50f, 1f);
+        drawList.AddImageRounded(texture.Handle, imageMin, imageMax, Vector2.Zero, Vector2.One, ImGui.GetColorU32(backgroundTint), 7f * scale);
 
         DrawCustomBackgroundEffect(drawList, imageMin, imageMax, scale, imageSize.X, imageSize.Y);
         drawList.PopClipRect();
@@ -430,7 +454,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
     private void DrawCustomBackgroundEffect(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
     {
-        var effect = config.CustomBackgroundEffectName;
+        var effect = GetActiveBackgroundEffectName();
 
         if (string.IsNullOrWhiteSpace(effect))
             return;
@@ -501,13 +525,35 @@ internal sealed class PrivacyWindow : Window, IDisposable
                 break;
 
             case "Cyberpunk":
-                for (var i = 0; i < 55; i++)
                 {
-                    var x = min.X + ((i * 71) % MathF.Max(1f, width));
-                    var y = min.Y + ((i * 43) % MathF.Max(1f, height));
-                    drawList.AddLine(new Vector2(x, y), new Vector2(x + 48f * scale, y + 10f * scale), Color(Alpha(color, 0.38f)), 1.7f * scale);
-                    drawList.AddLine(new Vector2(x + 10f * scale, y + 16f * scale), new Vector2(x + 55f * scale, y + 16f * scale), Color(new Vector4(0.10f, 0.95f, 1f, 0.26f)), 1.15f * scale);
-                    drawList.AddCircle(new Vector2(x + 18f * scale, y + 4f * scale), 6f * scale, Color(Alpha(light, 0.26f)), 12, 1.15f * scale);
+                    var cyan = new Vector4(0.00f, 0.94f, 1.00f, 1f);
+                    var magenta = new Vector4(1.00f, 0.08f, 0.78f, 1f);
+                    var purple = new Vector4(0.62f, 0.24f, 1.00f, 1f);
+                    var yellow = new Vector4(1.00f, 0.92f, 0.14f, 1f);
+                    var green = new Vector4(0.10f, 1.00f, 0.42f, 1f);
+                    var scanOffset = (animationTime * 18f * scale) % (38f * scale);
+
+                    for (var y = min.Y - scanOffset; y < max.Y + 38f * scale; y += 38f * scale)
+                        drawList.AddLine(new Vector2(min.X + 8f * scale, y), new Vector2(max.X - 8f * scale, y + 12f * scale), Color(Alpha(cyan, 0.18f)), 1.1f * scale);
+
+                    for (var x = min.X + 16f * scale; x < max.X; x += 62f * scale)
+                    {
+                        var pulse = 0.10f + MathF.Sin(animationTime * 2.3f + x * 0.025f) * 0.035f;
+                        drawList.AddLine(new Vector2(x, min.Y + 12f * scale), new Vector2(x + 24f * scale, max.Y - 10f * scale), Color(Alpha(purple, pulse)), 1.0f * scale);
+                    }
+
+                    for (var i = 0; i < 42; i++)
+                    {
+                        var x = min.X + ((i * 73 + (int)(animationTime * 10f)) % MathF.Max(1f, width));
+                        var y = min.Y + ((i * 47) % MathF.Max(1f, height));
+                        var neon = i % 5 == 0 ? yellow : i % 5 == 1 ? magenta : i % 5 == 2 ? green : i % 5 == 3 ? purple : cyan;
+                        var w = (12f + (i % 4) * 8f) * scale;
+                        var h = (2f + (i % 3)) * scale;
+                        drawList.AddRectFilled(new Vector2(x, y), new Vector2(x + w, y + h), Color(Alpha(neon, 0.20f + (i % 3) * 0.04f)), 1f * scale);
+
+                        if (i % 6 == 0)
+                            drawList.AddCircle(new Vector2(x + w + 5f * scale, y + h * 0.5f), 4.2f * scale, Color(Alpha(neon, 0.18f)), 12, 1f * scale);
+                    }
                 }
                 break;
 
@@ -654,10 +700,35 @@ internal sealed class PrivacyWindow : Window, IDisposable
         }
     }
 
+    private string GetActiveBackgroundEffectName()
+    {
+        if (!string.IsNullOrWhiteSpace(config.CustomBackgroundEffectName))
+            return config.CustomBackgroundEffectName;
+
+        var preset = config.ThemePresetName ?? string.Empty;
+        return preset switch
+        {
+            "All Red" or
+            "All Gold" or
+            "White Gold" or
+            "Chocolate" or
+            "Cyberpunk" or
+            "Water" or
+            "Fire" or
+            "Sakura" or
+            "Autumn" or
+            "Frost" => preset,
+            _ => string.Empty,
+        };
+    }
+
     private Vector4 GetCustomBackgroundEffectColor(string effect)
     {
-        if (config.CustomBackgroundEffectColorHex.TryGetValue(effect, out var hex))
+        if (string.Equals(config.CustomBackgroundEffectName, effect, StringComparison.Ordinal) &&
+            config.CustomBackgroundEffectColorHex.TryGetValue(effect, out var hex))
+        {
             return UiColors.WithAlpha(UiColors.HexToRgba(hex), 1f);
+        }
 
         return effect switch
         {
@@ -665,7 +736,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
             "All Gold" => new Vector4(1f, 0.78f, 0.27f, 1f),
             "White Gold" => new Vector4(1f, 0.92f, 0.58f, 1f),
             "Chocolate" => new Vector4(0.82f, 0.48f, 0.26f, 1f),
-            "Cyberpunk" => new Vector4(0.78f, 0.34f, 1f, 1f),
+            "Cyberpunk" => new Vector4(0.00f, 0.94f, 1.00f, 1f),
             "Water" => new Vector4(0.38f, 0.84f, 1f, 1f),
             "Fire" => new Vector4(1f, 0.52f, 0.16f, 1f),
             "Sakura" => new Vector4(1f, 0.60f, 0.80f, 1f),
@@ -836,17 +907,43 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
     private void DrawCyberpunkBackdrop(ImDrawListPtr drawList, Vector2 min, Vector2 max, float scale, float width, float height)
     {
-        for (var x = min.X + 18f * scale; x < max.X; x += 48f * scale)
-            drawList.AddLine(new Vector2(x, min.Y + 8f * scale), new Vector2(x, max.Y - 8f * scale), Color(new Vector4(0.04f, 0.88f, 1.00f, 0.14f)), 1.4f * scale);
+        var time = (float)ImGui.GetTime();
+        var cyan = new Vector4(0.00f, 0.94f, 1.00f, 1f);
+        var magenta = new Vector4(1.00f, 0.08f, 0.78f, 1f);
+        var purple = new Vector4(0.62f, 0.24f, 1.00f, 1f);
+        var yellow = new Vector4(1.00f, 0.92f, 0.14f, 1f);
+        var green = new Vector4(0.10f, 1.00f, 0.42f, 1f);
 
-        for (var y = min.Y + 24f * scale; y < max.Y; y += 52f * scale)
-            drawList.AddLine(new Vector2(min.X + 8f * scale, y), new Vector2(max.X - 8f * scale, y + 18f * scale), Color(new Vector4(1.00f, 0.18f, 0.82f, 0.15f)), 1.6f * scale);
+        drawList.AddRectFilled(min, max, Color(new Vector4(0.008f, 0.010f, 0.014f, 0.42f)), 7f * scale);
+        drawList.AddRectFilled(min + new Vector2(width * 0.04f, height * 0.10f), min + new Vector2(width * 0.92f, height * 0.35f), Color(new Vector4(0.045f, 0.050f, 0.060f, 0.18f)), 3f * scale);
+        drawList.AddRectFilled(min + new Vector2(width * 0.12f, height * 0.52f), min + new Vector2(width * 0.96f, height * 0.82f), Color(new Vector4(0.020f, 0.023f, 0.030f, 0.20f)), 3f * scale);
 
-        for (var i = 0; i < 22; i++)
+        var gridOffset = (time * 14f * scale) % (32f * scale);
+        for (var x = min.X - gridOffset; x < max.X + 32f * scale; x += 32f * scale)
+            drawList.AddLine(new Vector2(x, min.Y + 6f * scale), new Vector2(x + 46f * scale, max.Y - 6f * scale), Color(new Vector4(0.00f, 0.94f, 1.00f, 0.075f)), 1f * scale);
+
+        for (var y = min.Y + 18f * scale + gridOffset; y < max.Y; y += 42f * scale)
+            drawList.AddLine(new Vector2(min.X + 8f * scale, y), new Vector2(max.X - 8f * scale, y + 13f * scale), Color(new Vector4(1.00f, 0.08f, 0.78f, 0.105f)), 1.15f * scale);
+
+        for (var i = 0; i < 38; i++)
         {
-            var x = min.X + ((i * 71) % MathF.Max(1f, width));
-            var y = min.Y + ((i * 43) % MathF.Max(1f, height));
-            drawList.AddRect(new Vector2(x, y), new Vector2(x + 12f * scale, y + 7f * scale), Color(new Vector4(0.78f, 0.34f, 1f, 0.17f)), 1.5f * scale, ImDrawFlags.None, 1.1f * scale);
+            var point = GetAnimatedThemeSymbolPoint(min, 10f * scale, MathF.Max(1f, width - 20f * scale), MathF.Max(1f, height - 20f * scale), i, 38, 861u, time, 4.2f * scale, 0.032f, i % 2 == 0);
+            var neon = i % 5 == 0 ? yellow : i % 5 == 1 ? magenta : i % 5 == 2 ? green : i % 5 == 3 ? purple : cyan;
+            var w = (10f + (i % 4) * 7f) * scale;
+            var h = (2.2f + (i % 3) * 0.9f) * scale;
+            drawList.AddRectFilled(point, point + new Vector2(w, h), Color(Alpha(neon, 0.14f + (i % 4) * 0.025f)), 1f * scale);
+
+            if (i % 4 == 0)
+                drawList.AddLine(point + new Vector2(w + 4f * scale, h * 0.5f), point + new Vector2(w + 24f * scale, h * 0.5f), Color(Alpha(neon, 0.16f)), 1f * scale);
+        }
+
+        for (var i = 0; i < 7; i++)
+        {
+            var y = min.Y + (44f + i * 72f) * scale;
+            var left = min.X + (i % 2 == 0 ? 18f : 54f) * scale;
+            var right = max.X - (i % 3 == 0 ? 52f : 20f) * scale;
+            drawList.AddLine(new Vector2(left, y), new Vector2(right, y - 18f * scale), Color(Alpha(i % 2 == 0 ? cyan : magenta, 0.18f)), 1.7f * scale);
+            drawList.AddLine(new Vector2(left + 6f * scale, y + 5f * scale), new Vector2(right - 8f * scale, y - 12f * scale), Color(Alpha(i % 2 == 0 ? purple : green, 0.08f)), 1.0f * scale);
         }
     }
 
@@ -1182,6 +1279,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
     private void DrawCompactMainColumn(ImDrawListPtr drawList, float mainColumnWidth, float bodyHeight, float gradientInset)
     {
+        using var mainColumnBg = ImRaii.PushColor(ImGuiCol.ChildBg, IsCustomMainBackgroundActive() ? Vector4.Zero : UiColors.Get("PrivateChildBg"));
         using var mainColumn = ImRaii.Child("compact-main-column", new Vector2(mainColumnWidth, bodyHeight), false);
         if (!mainColumn)
             return;
@@ -1191,7 +1289,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
         var childMin = ImGui.GetWindowPos();
         var childMax = childMin + ImGui.GetWindowSize();
-        DrawThemeBackdrop(ImGui.GetWindowDrawList(), childMin, childMax);
+        if (!IsCustomMainBackgroundActive())
+            DrawThemeBackdrop(ImGui.GetWindowDrawList(), childMin, childMax);
 
         var drewTopWarnings = DrawCompactTopWarnings();
         if (drewTopWarnings)
@@ -1227,33 +1326,42 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var drawList = ImGui.GetWindowDrawList();
         var headerStart = ImGui.GetCursorScreenPos();
         var headerEnd = headerStart + new Vector2(width, height);
+        var headerVisualStart = new Vector2(hasMainBackgroundBounds ? mainBackgroundMin.X : ImGui.GetWindowPos().X, headerStart.Y);
+        var headerVisualWidth = hasMainBackgroundBounds ? MathF.Max(1f, mainBackgroundMax.X - mainBackgroundMin.X) : ImGui.GetWindowSize().X;
+        var headerVisualEnd = headerVisualStart + new Vector2(headerVisualWidth, height);
 
         var headerTop = Lighten(Alpha(config.WindowBackgroundColor, MathF.Min(1f, MathF.Max(0.38f, config.WindowBackgroundColor.W))), 0.028f);
         var headerBottom = Alpha(config.WindowBackgroundColor, 0.0f);
+        drawList.PushClipRect(windowClipMin, windowClipMax, false);
         drawList.AddRectFilledMultiColor(
-            headerStart,
-            headerEnd,
+            headerVisualStart,
+            headerVisualEnd,
             Color(headerTop),
             Color(headerTop),
             Color(headerBottom),
             Color(headerBottom));
+        DrawHeaderBottomGradient(drawList, headerVisualStart, headerVisualEnd, headerVisualWidth);
+        drawList.PopClipRect();
 
         DrawHeaderParticles(drawList, headerStart, new Vector2(width, height));
-        DrawHeaderBottomGradient(drawList, headerStart, headerEnd, width);
 
-        var uidStartX = 16f * scale;
-        var titleFontSize = 20f * scale;
-        var titleIcon = char.ConvertFromUtf32(0xF70E);
+        var uidStartX = 13f * scale;
+        var avatarSize = new Vector2(43f, 43f) * scale;
+        var avatarPos = new Vector2(headerStart.X + uidStartX, headerStart.Y + (height - avatarSize.Y) * 0.5f);
+        DrawOwnProfileHeaderSquare(drawList, avatarPos, avatarSize);
+
+        var titleFontSize = 23.0f * scale;
         var titleY = headerStart.Y + MathF.Max(0f, (height - titleFontSize) * 0.5f);
-        var titleIconPos = new Vector2(headerStart.X + uidStartX, titleY + 1f * scale);
-        Vector2 titleIconSize;
+        var iconText = char.ConvertFromUtf32(0xF70E);
+        var iconFontSize = 18.8f * scale;
+        var iconPos = new Vector2(avatarPos.X + avatarSize.X + 9f * scale, headerStart.Y + (height - iconFontSize) * 0.5f + 1f * scale);
         using (ImRaii.PushFont(UiBuilder.IconFont))
-            titleIconSize = ImGui.CalcTextSize(titleIcon) * (titleFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+        {
+            drawList.AddText(UiBuilder.IconFont, iconFontSize, iconPos, Color(config.AccentColor), iconText);
+        }
 
-        drawList.AddText(UiBuilder.IconFont, titleFontSize, titleIconPos + new Vector2(1.2f, 1.2f), Color(new Vector4(0f, 0f, 0f, 0.78f)), titleIcon);
-        drawList.AddText(UiBuilder.IconFont, titleFontSize, titleIconPos, Color(config.AccentColor), titleIcon);
-
-        var titlePos = new Vector2(titleIconPos.X + titleIconSize.X + 7f * scale, titleY);
+        var iconWidth = ImGui.CalcTextSize(iconText).X * (iconFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+        var titlePos = new Vector2(iconPos.X + iconWidth + 7f * scale, titleY);
         DrawTextWithShadow(drawList, titlePos, Color(config.AccentColor), "Privacy", titleFontSize);
 
         var activeViewName = GetActiveViewDisplayName();
@@ -1282,11 +1390,75 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var drawList = ImGui.GetWindowDrawList();
         var size = new Vector2(24f, 24f) * scale;
         var minimalPos = headerStart + new Vector2(width - size.X - 12f * scale, (height - size.Y) * 0.5f);
-        var profilePos = minimalPos - new Vector2(size.X + 5f * scale, 0f);
-        var loginPos = profilePos - new Vector2(size.X + 5f * scale, 0f);
+        var loginPos = minimalPos - new Vector2(size.X + 5f * scale, 0f);
 
         DrawHeaderIconButton(drawList, loginPos, size, FontAwesomeIcon.Key, "Log In/Log Off", () => loginWindow.IsOpen = true);
-        DrawHeaderIconButton(drawList, profilePos, size, FontAwesomeIcon.User, "My Profile", () => myProfileWindow.Open());
+    }
+
+
+    private void DrawOwnProfileHeaderSquare(ImDrawListPtr drawList, Vector2 pos, Vector2 size)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var rounding = 5f * scale;
+        var texture = profileImages.GetTexture(config.CloudProfileAvatarLocalPath);
+
+        drawList.AddRectFilled(pos, pos + size, Color(Alpha(config.WindowBackgroundColor, 0.58f)), rounding);
+        if (texture != null)
+            drawList.AddImageRounded(texture.Handle, pos, pos + size, Vector2.Zero, Vector2.One, Color(Vector4.One), rounding);
+        else
+        {
+            using (ImRaii.PushFont(UiBuilder.IconFont))
+            {
+                var icon = FontAwesomeIcon.User.ToIconString();
+                var iconFontSize = 13.5f * scale;
+                var iconSize = ImGui.CalcTextSize(icon) * (iconFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+                drawList.AddText(UiBuilder.IconFont, iconFontSize, pos + (size - iconSize) * 0.5f, Color(Alpha(UiColors.TextDim, 0.85f)), icon);
+            }
+        }
+
+        drawList.AddRect(pos, pos + size, Color(Alpha(config.AccentColor, 0.42f)), rounding, ImDrawFlags.None, 1f * scale);
+        DrawStatusBadge(config.CloudPresenceStatus == ContactStatus.Offline ? ContactStatus.Online : config.CloudPresenceStatus, pos + size - new Vector2(9.0f, 9.0f) * scale, 4.8f * scale, false);
+
+        ImGui.SetCursorScreenPos(pos);
+        ImGui.InvisibleButton("own-profile-header", size);
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        if (hovered)
+        {
+            DrawGlowRect(drawList, pos, pos + size, config.AccentColor, rounding, 0.14f);
+            ImGui.SetTooltip("Profile and status");
+        }
+
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Left) || ImGui.IsItemClicked(ImGuiMouseButton.Right))
+            ImGui.OpenPopup("own-profile-header-menu");
+
+        if (ImGui.BeginPopup("own-profile-header-menu"))
+        {
+            if (ImGui.MenuItem("Edit profile"))
+                myProfileWindow.Open();
+
+            if (ImGui.BeginMenu("Status"))
+            {
+                DrawOwnStatusMenuItem(ContactStatus.Online, "Online");
+                DrawOwnStatusMenuItem(ContactStatus.Idle, "Idle");
+                DrawOwnStatusMenuItem(ContactStatus.Busy, "Busy");
+                DrawOwnStatusMenuItem(ContactStatus.Afk, "AFK");
+                DrawOwnStatusMenuItem(ContactStatus.Content, "Content");
+                DrawOwnStatusMenuItem(ContactStatus.Streaming, "Streaming");
+                ImGui.EndMenu();
+            }
+
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawOwnStatusMenuItem(ContactStatus status, string label)
+    {
+        if (ImGui.MenuItem(label, string.Empty, config.CloudPresenceStatus == status))
+        {
+            config.CloudPresenceStatus = status;
+            config.Save();
+            log.Information("Privacy: custom presence status set to {Status}.", status);
+        }
     }
 
     private void DrawHeaderIconButton(ImDrawListPtr drawList, Vector2 pos, Vector2 size, FontAwesomeIcon icon, string tooltip, Action click)
@@ -1373,15 +1545,15 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var collapsePos = loginPos - new Vector2(size.X + 5f * scale, 0f);
         var closePos = collapsePos - new Vector2(size.X + 5f * scale, 0f);
 
-        DrawHeaderWindowButton(drawList, closePos, size, "X", UiColors.Busy, "Close Privacy", () => IsOpen = false);
-        DrawHeaderWindowButton(drawList, collapsePos, size, config.WindowCollapsed ? "+" : "-", config.AccentColor, config.WindowCollapsed ? "Expand Privacy" : "Collapse Privacy", () =>
+        DrawHeaderWindowButton(drawList, closePos, size, char.ConvertFromUtf32(0xF00D), UiColors.Busy, "Close Privacy", () => IsOpen = false, true);
+        DrawHeaderWindowButton(drawList, collapsePos, size, config.WindowCollapsed ? "+" : char.ConvertFromUtf32(0xF068), config.AccentColor, config.WindowCollapsed ? "Expand Privacy" : "Collapse Privacy", () =>
         {
             config.WindowCollapsed = !config.WindowCollapsed;
             config.Save();
-        });
+        }, !config.WindowCollapsed);
     }
 
-    private void DrawHeaderWindowButton(ImDrawListPtr drawList, Vector2 pos, Vector2 size, string text, Vector4 hoverColor, string tooltip, Action click)
+    private void DrawHeaderWindowButton(ImDrawListPtr drawList, Vector2 pos, Vector2 size, string text, Vector4 hoverColor, string tooltip, Action click, bool useIconFont = false)
     {
         var scale = ImGuiHelpers.GlobalScale;
         ImGui.SetCursorScreenPos(pos);
@@ -1394,8 +1566,19 @@ internal sealed class PrivacyWindow : Window, IDisposable
         drawList.AddRect(pos, pos + size, Color(Alpha(hovered ? hoverColor : UiColors.TextDim, hovered ? 0.58f : 0.22f)), 4f * scale, ImDrawFlags.None, 1f * scale);
 
         var fontSize = 12.8f * scale;
-        var textSize = ImGui.CalcTextSize(text) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
-        DrawTextWithShadow(drawList, pos + (size - textSize) * 0.5f, Color(hovered ? hoverColor : UiColors.TextDim), text, fontSize);
+        if (useIconFont)
+        {
+            using (ImRaii.PushFont(UiBuilder.IconFont))
+            {
+                var textSize = ImGui.CalcTextSize(text) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+                drawList.AddText(UiBuilder.IconFont, fontSize, pos + (size - textSize) * 0.5f, Color(hovered ? hoverColor : UiColors.TextDim), text);
+            }
+        }
+        else
+        {
+            var textSize = ImGui.CalcTextSize(text) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            DrawTextWithShadow(drawList, pos + (size - textSize) * 0.5f, Color(hovered ? hoverColor : UiColors.TextDim), text, fontSize);
+        }
 
         if (hovered)
             ImGui.SetTooltip(tooltip);
@@ -1702,13 +1885,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
             }
         }
 
-        var color = friend.Status switch
-        {
-            ContactStatus.Busy => UiColors.Busy,
-            ContactStatus.Online => UiColors.Online,
-            _ => UiColors.Offline,
-        };
-        drawList.AddCircleFilled(pos + size * 0.5f, size.X * 0.28f, Color(color), 18);
+        DrawStatusBadge(friend.Status, pos + size * 0.5f, size.X * 0.28f, true);
     }
 
 
@@ -1723,18 +1900,33 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
         if (venues.Count == 0)
         {
-            ImGui.AlignTextToFramePadding();
-            using (ImRaii.PushStyle(ImGuiStyleVar.Alpha, 0.75f))
-                ImGui.TextUnformatted("No venues created yet.");
+            if (!venueSuggestionDropdownOpen)
+            {
+                ImGui.AlignTextToFramePadding();
+                using (ImRaii.PushStyle(ImGuiStyleVar.Alpha, 0.75f))
+                    ImGui.TextUnformatted("No venues created yet.");
+            }
+
+            DrawPendingVenueNameSuggestions();
             DrawVenueDeferredPopups();
             return;
         }
 
-        foreach (var venue in venues.ToList())
-            DrawVenueRow(venue);
+        var previousVenueRowsInputBlocked = venueRowsInputBlocked;
+        venueRowsInputBlocked = venueSuggestionDropdownOpen;
+        try
+        {
+            foreach (var venue in venues.ToList())
+                DrawVenueRow(venue);
+        }
+        finally
+        {
+            venueRowsInputBlocked = previousVenueRowsInputBlocked;
+        }
 
         DrawManualDropPreview();
         ClearManualDragIfReleased();
+        DrawPendingVenueNameSuggestions();
         DrawVenueDeferredPopups();
     }
 
@@ -1755,13 +1947,33 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var colorSize = new Vector2(24f, 24f) * scale;
         var plusSize = new Vector2(30f, 24f) * scale;
         var spacing = 5f * scale;
-        var inputWidth = MathF.Max(70f * scale, width - pad * 2f - colorSize.X - plusSize.X - spacing * 2f);
+        var guideWidth = 154f * scale;
+        var inputWidth = MathF.Max(70f * scale, width - pad * 2f - colorSize.X - plusSize.X - guideWidth - spacing * 3f);
 
         ImGui.SetCursorScreenPos(start + new Vector2(pad, 4f * scale));
         ImGui.SetNextItemWidth(inputWidth);
+        var inputMin = ImGui.GetCursorScreenPos();
         using (ImRaii.PushColor(ImGuiCol.Border, Alpha(config.AccentColor, 0.62f)))
         using (ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, 1f * scale))
-            ImGui.InputTextWithHint("##new_venue_name", "Venue name", ref newVenueNameBuffer, 80);
+        {
+            var venueNameChanged = ImGui.InputTextWithHint("##new_venue_name", "Venue name", ref newVenueNameBuffer, 80);
+            if (venueNameChanged)
+            {
+                selectedVenueSuggestion = ffxivVenuesService.FindByName(newVenueNameBuffer);
+                venueSuggestionDropdownOpen = true;
+            }
+
+            venueNameInputActive = ImGui.IsItemActive();
+            venueNameInputFocused = ImGui.IsItemFocused();
+            var venueNameInputClicked = ImGui.IsItemClicked();
+            var venueNameInputActivated = ImGui.IsItemActivated();
+            if (venueNameInputClicked || venueNameInputActivated)
+                venueSuggestionDropdownOpen = true;
+        }
+        var inputMax = ImGui.GetItemRectMax();
+
+        ImGui.SameLine(0f, spacing);
+        DrawVenueGuideField(guideWidth);
 
         ImGui.SameLine(0f, spacing);
         DrawColorSquare("new_venue_color", ref venuePickerColor, ref venueColorHexBuffer);
@@ -1775,7 +1987,273 @@ internal sealed class PrivacyWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Create venue");
 
+        venueSuggestionLayoutReady = true;
+        venueSuggestionInputWidth = inputWidth;
+        venueSuggestionInputMin = inputMin;
+        venueSuggestionInputMax = inputMax;
+
         ImGui.SetCursorScreenPos(start + new Vector2(0f, height + 5f * scale));
+    }
+
+
+    private void DrawVenueGuideField(float width)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var pos = ImGui.GetCursorScreenPos();
+        var size = new Vector2(width, 24f * scale);
+        var drawList = ImGui.GetWindowDrawList();
+        var selected = selectedVenueSuggestion != null || ffxivVenuesService.FindByName(newVenueNameBuffer) != null;
+        var border = selected ? UiColors.WithAlpha(UiColors.Online, 0.56f) : UiColors.WithAlpha(config.AccentColor, 0.28f);
+        var text = selected ? "Select color and hit [+]" : "<- Select a venue..";
+        var textColor = selected ? UiColors.WithAlpha(UiColors.Online, 0.92f) : UiColors.WithAlpha(UiColors.TextDim, 0.62f);
+
+        drawList.AddRectFilled(pos, pos + size, Color(UiColors.WithAlpha(config.WindowBackgroundColor, 0.52f)), 4f * scale);
+        drawList.AddRect(pos, pos + size, Color(border), 4f * scale, ImDrawFlags.None, 1f * scale);
+        var textSize = ImGui.CalcTextSize(text);
+        drawList.AddText(pos + new Vector2(7f * scale, (size.Y - textSize.Y) * 0.5f), Color(textColor), text);
+        ImGui.InvisibleButton("##venue_guidance", size);
+    }
+
+    private void DrawPendingVenueNameSuggestions()
+    {
+        if (!venueSuggestionLayoutReady)
+            return;
+
+        DrawVenueNameSuggestions(venueSuggestionInputWidth, venueSuggestionInputMin, venueSuggestionInputMax);
+        venueSuggestionLayoutReady = false;
+    }
+
+    private static float GetVenueSuggestionDropdownHeight(int matchCount)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var rowHeight = 24f * scale;
+        return MathF.Min(235f * scale, MathF.Max(60f * scale, matchCount * rowHeight + 10f * scale));
+    }
+
+    private void DrawVenueNameSuggestions(float inputWidth, Vector2 inputMin, Vector2 inputMax)
+    {
+        ffxivVenuesService.EnsureFreshAsync();
+
+        venueSuggestionDropdownHovered = false;
+        if (!venueSuggestionDropdownOpen)
+        {
+            venueSuggestionScrollOffset = 0f;
+            return;
+        }
+
+        var matches = ffxivVenuesService.Search(newVenueNameBuffer, 160);
+        if (matches.Count == 0)
+        {
+            venueSuggestionScrollOffset = 0f;
+            return;
+        }
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var rowHeight = 24f * scale;
+        var visibleHeight = GetVenueSuggestionDropdownHeight(matches.Count);
+        var popupPos = new Vector2(inputMin.X, inputMax.Y + 3f * scale);
+        var popupSize = new Vector2(inputWidth, visibleHeight);
+        var popupMin = popupPos;
+        var popupMax = popupPos + popupSize;
+        var mousePos = ImGui.GetMousePos();
+        var popupHovered = ImGui.IsMouseHoveringRect(popupMin, popupMax);
+        var inputHovered = ImGui.IsMouseHoveringRect(inputMin, inputMax);
+        venueSuggestionDropdownHovered = popupHovered;
+
+        if (!venueNameInputActive && !venueNameInputFocused)
+        {
+            venueSuggestionDropdownOpen = false;
+            venueSuggestionScrollOffset = 0f;
+            return;
+        }
+
+        if (ImGui.IsMouseClicked(ImGuiMouseButton.Left) && !popupHovered && !inputHovered)
+        {
+            venueSuggestionDropdownOpen = false;
+            venueSuggestionScrollOffset = 0f;
+            return;
+        }
+
+        var contentHeight = matches.Count * rowHeight;
+        var maxScroll = MathF.Max(0f, contentHeight - (popupSize.Y - 10f * scale));
+        if (popupHovered)
+        {
+            var wheel = ImGui.GetIO().MouseWheel;
+            if (MathF.Abs(wheel) > 0.001f)
+                venueSuggestionScrollOffset = Math.Clamp(venueSuggestionScrollOffset - wheel * rowHeight * 2.5f, 0f, maxScroll);
+        }
+        else if (venueNameInputActive || venueNameInputFocused)
+        {
+            venueSuggestionScrollOffset = Math.Clamp(venueSuggestionScrollOffset, 0f, maxScroll);
+        }
+
+        var drawList = ImGui.GetForegroundDrawList();
+        var rounding = 5f * scale;
+        drawList.AddRectFilled(popupMin, popupMax, Color(UiColors.WithAlpha(config.WindowBackgroundColor, 0.98f)), rounding);
+        drawList.AddRect(popupMin, popupMax, Color(UiColors.WithAlpha(config.AccentColor, 0.44f)), rounding, ImDrawFlags.None, 1f * scale);
+
+        var clipMin = popupMin + new Vector2(1f, 1f) * scale;
+        var clipMax = popupMax - new Vector2(1f, 1f) * scale;
+        drawList.PushClipRect(clipMin, clipMax, true);
+
+        string? hoveredTooltip = null;
+        var firstIndex = Math.Clamp((int)MathF.Floor(venueSuggestionScrollOffset / rowHeight), 0, Math.Max(0, matches.Count - 1));
+        var y = popupMin.Y + 5f * scale - (venueSuggestionScrollOffset - firstIndex * rowHeight);
+        var lastIndex = Math.Min(matches.Count, firstIndex + (int)MathF.Ceiling((popupSize.Y + rowHeight) / rowHeight) + 1);
+
+        for (var i = firstIndex; i < lastIndex; i++)
+        {
+            var venue = matches[i];
+            var rowMin = new Vector2(popupMin.X + 5f * scale, y);
+            var rowMax = new Vector2(popupMax.X - 5f * scale, y + rowHeight);
+            var rowHovered = ImGui.IsMouseHoveringRect(rowMin, rowMax);
+            var selected = selectedVenueSuggestion != null && string.Equals(selectedVenueSuggestion.Id, venue.Id, StringComparison.OrdinalIgnoreCase);
+
+            if (selected)
+                drawList.AddRectFilled(rowMin, rowMax, Color(UiColors.WithAlpha(config.AccentColor, 0.24f)), 3f * scale);
+            else if (rowHovered)
+                drawList.AddRectFilled(rowMin, rowMax, Color(UiColors.WithAlpha(config.AccentColor, 0.18f)), 3f * scale);
+
+            var textColor = selected ? UiColors.Text : UiColors.WithAlpha(UiColors.Text, rowHovered ? 1f : 0.88f);
+            drawList.AddText(rowMin + new Vector2(6f * scale, (rowHeight - ImGui.GetTextLineHeight()) * 0.5f), Color(textColor), venue.Name);
+
+            if (rowHovered)
+            {
+                ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+                if (!string.IsNullOrWhiteSpace(venue.LocationTooltip))
+                    hoveredTooltip = venue.LocationTooltip;
+
+                if (ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+                {
+                    selectedVenueSuggestion = venue;
+                    newVenueNameBuffer = venue.Name;
+                    venueSuggestionDropdownOpen = false;
+                    venueSuggestionScrollOffset = 0f;
+                }
+            }
+
+            y += rowHeight;
+        }
+
+        drawList.PopClipRect();
+
+        if (maxScroll > 0f)
+        {
+            var trackMin = new Vector2(popupMax.X - 5f * scale, popupMin.Y + 5f * scale);
+            var trackMax = new Vector2(popupMax.X - 3f * scale, popupMax.Y - 5f * scale);
+            var trackHeight = MathF.Max(1f, trackMax.Y - trackMin.Y);
+            var thumbHeight = MathF.Max(18f * scale, trackHeight * MathF.Min(1f, trackHeight / contentHeight));
+            var thumbY = trackMin.Y + (trackHeight - thumbHeight) * (venueSuggestionScrollOffset / maxScroll);
+            drawList.AddRectFilled(trackMin, trackMax, Color(UiColors.WithAlpha(config.AccentColor, 0.12f)), 2f * scale);
+            drawList.AddRectFilled(new Vector2(trackMin.X, thumbY), new Vector2(trackMax.X, thumbY + thumbHeight), Color(UiColors.WithAlpha(config.AccentColor, 0.48f)), 2f * scale);
+        }
+
+        if (!string.IsNullOrWhiteSpace(hoveredTooltip))
+            DrawForegroundVenueTooltip(hoveredTooltip, scale);
+    }
+
+    private void DrawForegroundVenueTooltip(string text, float scale)
+    {
+        var drawList = ImGui.GetForegroundDrawList();
+        var padding = new Vector2(8f, 6f) * scale;
+        var offset = new Vector2(14f, 18f) * scale;
+        var textSize = ImGui.CalcTextSize(text);
+        var tooltipSize = textSize + padding * 2f;
+        var pos = ImGui.GetMousePos() + offset;
+        var displaySize = ImGui.GetIO().DisplaySize;
+
+        if (pos.X + tooltipSize.X > displaySize.X - 8f * scale)
+            pos.X = MathF.Max(8f * scale, displaySize.X - tooltipSize.X - 8f * scale);
+
+        if (pos.Y + tooltipSize.Y > displaySize.Y - 8f * scale)
+            pos.Y = MathF.Max(8f * scale, ImGui.GetMousePos().Y - tooltipSize.Y - 12f * scale);
+
+        var min = pos;
+        var max = pos + tooltipSize;
+        drawList.AddRectFilled(min, max, Color(UiColors.WithAlpha(config.WindowBackgroundColor, 0.98f)), 4f * scale);
+        drawList.AddRect(min, max, Color(UiColors.WithAlpha(config.AccentColor, 0.50f)), 4f * scale, ImDrawFlags.None, 1f * scale);
+        drawList.AddText(min + padding, Color(UiColors.Text), text);
+    }
+
+    private PrivateContact BuildVenueContactFromSuggestion(FfxivVenueEntry venue, string colorHex)
+    {
+        var contact = new PrivateContact
+        {
+            Name = venue.Name,
+            DataCenter = venue.DataCenter,
+            CurrentDataCenter = venue.DataCenter,
+            World = venue.World,
+            CurrentWorld = venue.World,
+            LastKnownZone = venue.BuildFullLocation(),
+            ResidentialDetails = BuildVenueResidentialDetails(venue.District, venue.Ward, venue.Plot),
+            VenueColorHex = colorHex,
+            VenueTeleportCommand = BuildVenueTeleportCommandWithDataCenter(venue),
+            VenueDiscordUrl = venue.DiscordUrl,
+            CloudAvatarUrl = venue.ImageUrl,
+            AddedAt = DateTimeOffset.UtcNow,
+            Status = ContactStatus.Online,
+        };
+        QueueVenueImageDownload(contact, venue.ImageUrl);
+        return contact;
+    }
+
+    private static string BuildVenueTeleportCommandWithDataCenter(FfxivVenueEntry venue)
+    {
+        if (venue == null)
+            return string.Empty;
+
+        var parts = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(venue.DataCenter))
+            parts.Add(venue.DataCenter.Trim());
+        if (!string.IsNullOrWhiteSpace(venue.World))
+            parts.Add(venue.World.Trim());
+        if (!string.IsNullOrWhiteSpace(venue.District))
+            parts.Add(venue.District.Trim());
+        if (venue.Ward > 0)
+            parts.Add($"w{venue.Ward}");
+        if (venue.Plot > 0)
+            parts.Add($"p{venue.Plot}");
+
+        return parts.Count == 0 ? string.Empty : $"/li {string.Join(" ", parts)}";
+    }
+
+    private static string NormalizeVenueTeleportCommand(string command)
+    {
+        var text = (command ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text))
+            return string.Empty;
+        if (!text.StartsWith("/li ", StringComparison.OrdinalIgnoreCase))
+            text = "/li " + text.TrimStart('/').Trim();
+        return text.Replace(" W", " w", StringComparison.Ordinal).Replace(" P", " p", StringComparison.Ordinal);
+    }
+
+    private static string BuildVenueResidentialDetails(string district, int ward, int plot)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(district)) parts.Add(district);
+        if (ward > 0) parts.Add($"w{ward}");
+        if (plot > 0) parts.Add($"p{plot}");
+        return string.Join(" - ", parts);
+    }
+
+    private void QueueVenueImageDownload(PrivateContact venue, string imageUrl)
+    {
+        if (string.IsNullOrWhiteSpace(imageUrl))
+            return;
+        if (!string.IsNullOrWhiteSpace(venue.ProfileImagePath) && File.Exists(venue.ProfileImagePath))
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            var path = await profileImages.DownloadRemoteVenueImageAsync(imageUrl, venue.Id, CancellationToken.None, imageUrl).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                venue.ProfileImagePath = path;
+                venue.CloudManagedProfileImage = true;
+                config.Save();
+            }
+        });
     }
 
     private void CreateVenueFromInput()
@@ -1784,17 +2262,21 @@ internal sealed class PrivacyWindow : Window, IDisposable
         if (string.IsNullOrWhiteSpace(name))
             return;
 
-        var venue = new PrivateContact
-        {
-            Name = name,
-            VenueColorHex = NormalizeHex(venueColorHexBuffer, "#2BE5B5"),
-            LastKnownZone = "Click the message button to edit localization",
-            AddedAt = DateTimeOffset.UtcNow,
-            Status = ContactStatus.Online,
-        };
+        var venueSuggestion = selectedVenueSuggestion ?? ffxivVenuesService.FindByName(name);
+        var venue = venueSuggestion != null
+            ? BuildVenueContactFromSuggestion(venueSuggestion, NormalizeHex(venueColorHexBuffer, "#2BE5B5"))
+            : new PrivateContact
+            {
+                Name = name,
+                VenueColorHex = NormalizeHex(venueColorHexBuffer, "#2BE5B5"),
+                LastKnownZone = "Click the message button to edit localization",
+                AddedAt = DateTimeOffset.UtcNow,
+                Status = ContactStatus.Online,
+            };
 
         config.Venues.Add(venue);
         newVenueNameBuffer = string.Empty;
+        selectedVenueSuggestion = null;
         log.Information("Privacy: created venue {VenueName} with color {Color}.", venue.Name, venue.VenueColorHex);
         config.Save();
     }
@@ -1819,29 +2301,35 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
             var localMin = ImGui.GetWindowPos();
             var localMax = localMin + ImGui.GetWindowSize();
-            var hovered = ImGui.IsMouseHoveringRect(localMin, localMax);
+            var rowInteractionsBlocked = venueRowsInputBlocked || venueSuggestionDropdownOpen;
+            var hovered = !rowInteractionsBlocked && ImGui.IsMouseHoveringRect(localMin, localMax);
             var rounding = 3f * scale;
 
+            var rowBackgroundMin = GetFullRowBackgroundMin(localMin);
+            var rowBackgroundMax = GetFullRowBackgroundMax(localMax);
             if (!config.HideVenuesRowBackground)
-                drawList.AddRectFilled(localMin, localMax, Color(Alpha(venueColor, hovered ? 0.34f : 0.24f)), rounding);
-            HandleManualRowDrag(
-                "venue",
-                venue.Id,
-                null,
-                localMin,
-                localMax,
-                -1,
-                venueColor,
-                string.IsNullOrWhiteSpace(venue.Nickname) ? venue.Name : venue.Nickname,
-                string.IsNullOrWhiteSpace(venue.LastKnownZone) ? "No localization set." : venue.LastKnownZone);
+                DrawFullWidthRowFill(drawList, rowBackgroundMin, rowBackgroundMax, Alpha(venueColor, hovered ? 0.34f : 0.24f), rounding);
+            if (!rowInteractionsBlocked)
+            {
+                HandleManualRowDrag(
+                    "venue",
+                    venue.Id,
+                    null,
+                    localMin,
+                    localMax,
+                    -1,
+                    venueColor,
+                    string.IsNullOrWhiteSpace(venue.Nickname) ? venue.Name : venue.Nickname,
+                    string.IsNullOrWhiteSpace(venue.LastKnownZone) ? "No localization set." : venue.LastKnownZone);
+            }
 
-            var portraitBaseSize = minimalMode ? 38f : PortraitSize;
+            var portraitBaseSize = minimalMode ? 44f : 63f;
             var portraitSize = new Vector2(portraitBaseSize * scale);
-            var portraitPos = localMin + new Vector2(6f, minimalMode ? 6f : 8f) * scale;
+            var portraitPos = localMin + new Vector2(5f, minimalMode ? 4f : 4f) * scale;
             ImGui.SetCursorScreenPos(portraitPos);
             DrawVenueProfileSquare(venue, portraitSize, venueColor);
 
-            var textLeft = localMin.X + (portraitBaseSize + 14f) * scale;
+            var textLeft = localMin.X + (portraitBaseSize + 10f) * scale;
             var textRight = localMax.X - 7f * scale;
             var textWidth = textRight - textLeft;
 
@@ -1849,13 +2337,15 @@ internal sealed class PrivacyWindow : Window, IDisposable
             if (!minimalMode)
                 DrawVenueActionButtons(venue, new Vector2(textLeft, localMin.Y + 50f * scale), textWidth);
 
-            if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+            if (!rowInteractionsBlocked && hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
                 ImGui.OpenPopup("venue-context");
 
-            DrawVenueContextPopup(venue);
+            if (!rowInteractionsBlocked)
+                DrawVenueContextPopup(venue);
         }
 
-        DrawRowDivider(rowStart.X + 6f * scale, rowEnd.X - 6f * scale, rowEnd.Y - 1f * scale, venueColor, 0.52f);
+        if (!config.HideVenuesDivisor)
+            DrawRowDivider(rowStart.X, rowEnd.X, rowEnd.Y - 1f * scale, venueColor, 0.52f);
     }
 
     private void DrawVenueTexts(PrivateContact venue, Vector2 pos, float width, Vector4 venueColor)
@@ -1864,8 +2354,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var drawList = ImGui.GetWindowDrawList();
         var nameFontSize = 18.0f * scale;
         var tagFontSize = 14.2f * scale;
+        var stateFontSize = 15.8f * scale;
         var safeWidth = MathF.Max(40f * scale, width);
-        var iconReserve = 36f * scale;
         var gap = 5f * scale;
 
         var name = string.IsNullOrWhiteSpace(venue.Nickname) ? venue.Name : venue.Nickname;
@@ -1873,12 +2363,20 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var hasSymbol = !string.IsNullOrWhiteSpace(symbolText);
         var symbolWidth = hasSymbol ? ImGui.CalcTextSize(symbolText).X * (nameFontSize / MathF.Max(1f, ImGui.GetFontSize())) + gap : 0f;
 
+        var catalogVenue = ffxivVenuesService.FindByName(venue.Name);
+        var hasState = catalogVenue != null;
+        var stateText = hasState ? (catalogVenue!.IsOpenNow ? "Open" : "Closed") : string.Empty;
+        var stateColor = hasState && catalogVenue!.IsOpenNow ? new Vector4(0.56f, 1.00f, 0.62f, 1f) : new Vector4(1.00f, 0.42f, 0.42f, 1f);
+        var stateWidth = hasState ? GetScaledTextWidth(stateText, stateFontSize) + gap : 0f;
+
         var tagText = (venue.Tag ?? string.Empty).Trim();
         var hasTag = !string.IsNullOrWhiteSpace(tagText);
         var tagSize = hasTag ? ImGui.CalcTextSize(tagText) * (tagFontSize / MathF.Max(1f, ImGui.GetFontSize())) : Vector2.Zero;
-        var maxTagWidth = hasTag ? MathF.Min(tagSize.X, MathF.Max(26f * scale, safeWidth * 0.28f)) : 0f;
+        var maxTagWidth = hasTag ? MathF.Min(tagSize.X, MathF.Max(26f * scale, safeWidth * 0.24f)) : 0f;
+        var starWidth = 15f * scale;
+        var rightReserve = (hasTag ? maxTagWidth + gap : 0f) + starWidth + gap + stateWidth + 2f * scale;
         var nameSize = ImGui.CalcTextSize(name) * (nameFontSize / MathF.Max(1f, ImGui.GetFontSize()));
-        var visibleNameWidth = MathF.Min(nameSize.X, MathF.Max(24f * scale, safeWidth - iconReserve - maxTagWidth - gap - symbolWidth));
+        var visibleNameWidth = MathF.Min(nameSize.X, MathF.Max(24f * scale, safeWidth - rightReserve - symbolWidth));
 
         var nameStart = pos;
         if (hasSymbol)
@@ -1891,11 +2389,14 @@ internal sealed class PrivacyWindow : Window, IDisposable
         DrawTextWithShadow(drawList, nameStart, Color(UiColors.Text), name, nameFontSize);
         drawList.PopClipRect();
 
-        ImGui.SetCursorScreenPos(pos);
-        ImGui.InvisibleButton("venue-name-hover", new Vector2(symbolWidth + visibleNameWidth, 22f * scale));
-        var tooltip = BuildNameTooltip(venue);
-        if (ImGui.IsItemHovered() && !string.IsNullOrWhiteSpace(tooltip))
-            ImGui.SetTooltip(tooltip);
+        if (!venueRowsInputBlocked)
+        {
+            ImGui.SetCursorScreenPos(pos);
+            ImGui.InvisibleButton("venue-name-hover", new Vector2(symbolWidth + visibleNameWidth, 22f * scale));
+            var tooltip = BuildNameTooltip(venue);
+            if (ImGui.IsItemHovered() && !string.IsNullOrWhiteSpace(tooltip))
+                ImGui.SetTooltip(tooltip);
+        }
 
         var cursorX = nameStart.X + visibleNameWidth + gap;
         if (hasTag)
@@ -1908,21 +2409,31 @@ internal sealed class PrivacyWindow : Window, IDisposable
             cursorX += maxTagWidth + gap;
         }
 
-        var starPos = new Vector2(MathF.Min(cursorX + 1.5f * scale, pos.X + safeWidth - 16f * scale), pos.Y + 5.8f * scale);
+        var starPos = new Vector2(cursorX, pos.Y + 5.8f * scale);
         using (ImRaii.PushFont(UiBuilder.IconFont))
         {
             var color = venue.Favorite ? UiColors.Favorite : Alpha(UiColors.TextDim, 0.38f);
-            drawList.AddText(UiBuilder.IconFont, 8.7f * scale, starPos, Color(color), FontAwesomeIcon.Star.ToIconString());
+            drawList.AddText(UiBuilder.IconFont, 8.9f * scale, starPos, Color(color), FontAwesomeIcon.Star.ToIconString());
         }
 
-        ImGui.SetCursorScreenPos(starPos - new Vector2(2f * scale));
-        if (ImGui.InvisibleButton("venue-favorite", new Vector2(13f * scale, 13f * scale)))
+        if (!venueRowsInputBlocked)
         {
-            venue.Favorite = !venue.Favorite;
-            config.Save();
+            ImGui.SetCursorScreenPos(starPos - new Vector2(2f * scale));
+            if (ImGui.InvisibleButton("venue-favorite", new Vector2(13f * scale, 13f * scale)))
+            {
+                venue.Favorite = !venue.Favorite;
+                config.Save();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(venue.Favorite ? "Remove favorite" : "Add favorite");
         }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(venue.Favorite ? "Remove favorite" : "Add favorite");
+
+        cursorX += starWidth + gap;
+        if (hasState)
+        {
+            var statePos = new Vector2(cursorX, pos.Y + 1.4f * scale);
+            DrawBoldTextWithShadow(drawList, statePos, Color(stateColor), stateText, stateFontSize);
+        }
 
         var locationPos = pos + new Vector2(0f, 22f * scale);
         var location = string.IsNullOrWhiteSpace(venue.LastKnownZone) ? "No localization set." : venue.LastKnownZone;
@@ -1937,24 +2448,32 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var spacing = 4f * scale;
         var buttonHeight = 24f * scale;
         var fullWidth = MathF.Max(40f * scale, width);
-        var buttonWidth = MathF.Max(30f * scale, (fullWidth - spacing * 3f) / 4f);
+        var buttonWidth = MathF.Max(25f * scale, (fullWidth - spacing * 4f) / 5f);
         var x = pos.X;
 
-        DrawActionButton(FontAwesomeIcon.Comment, "Edit localization", UiColors.PurpleHover, new Vector2(buttonWidth, buttonHeight), () => OpenVenueLocationEditor(venue), x, pos.Y);
+        DrawActionButton(char.ConvertFromUtf32(0xF1D8), "Venue Discord", UiColors.PurpleHover, new Vector2(buttonWidth, buttonHeight), () => OpenVenueDiscord(venue), x, pos.Y, venueRowsInputBlocked);
+        x += buttonWidth + spacing;
+        DrawActionButton(char.ConvertFromUtf32(0xF518), "Opening/Close hours", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => OpenVenueHoursWindow(venue), x, pos.Y, venueRowsInputBlocked);
         x += buttonWidth + spacing;
         DrawVenueTeleportButton(venue, new Vector2(x, pos.Y), new Vector2(buttonWidth, buttonHeight));
         x += buttonWidth + spacing;
-        DrawActionButton(FontAwesomeIcon.Tag, "Tag", config.AccentColor, new Vector2(buttonWidth, buttonHeight), () => OpenTagEditor(venue), x, pos.Y);
+        DrawActionButton(FontAwesomeIcon.Tag, "Tag", config.AccentColor, new Vector2(buttonWidth, buttonHeight), () => OpenTagEditor(venue), x, pos.Y, venueRowsInputBlocked);
         x += buttonWidth + spacing;
-        DrawActionButton(FontAwesomeIcon.Book, "Notes", UiColors.BrownHover, new Vector2(buttonWidth, buttonHeight), () => notesWindow.Open(venue), x, pos.Y);
+        DrawActionButton(FontAwesomeIcon.Book, "Notes", UiColors.BrownHover, new Vector2(buttonWidth, buttonHeight), () => notesWindow.Open(venue), x, pos.Y, venueRowsInputBlocked);
     }
 
     private void DrawVenueTeleportButton(PrivateContact venue, Vector2 pos, Vector2 size)
     {
-        ImGui.SetCursorScreenPos(pos);
-        var clicked = ImGui.InvisibleButton("venue-teleport", size);
-        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
-        var rightClicked = hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Right);
+        var clicked = false;
+        var hovered = false;
+        var rightClicked = false;
+        if (!venueRowsInputBlocked)
+        {
+            ImGui.SetCursorScreenPos(pos);
+            clicked = ImGui.InvisibleButton("venue-teleport", size);
+            hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+            rightClicked = hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Right);
+        }
         var drawList = ImGui.GetWindowDrawList();
         var scale = ImGuiHelpers.GlobalScale;
 
@@ -1983,6 +2502,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var min = ImGui.GetCursorScreenPos();
         var max = min + size;
         var rounding = 4f * ImGuiHelpers.GlobalScale;
+        if (string.IsNullOrWhiteSpace(venue.ProfileImagePath) && !string.IsNullOrWhiteSpace(venue.CloudAvatarUrl))
+            QueueVenueImageDownload(venue, venue.CloudAvatarUrl);
         var texture = profileImages.GetTexture(venue.ProfileImagePath);
 
         if (IsCustomMainBackgroundActive())
@@ -2005,15 +2526,18 @@ internal sealed class PrivacyWindow : Window, IDisposable
             }
         }
 
-        ImGui.InvisibleButton("venue-profile-image", size);
-        if (ImGui.IsItemHovered())
+        if (!venueRowsInputBlocked)
         {
-            DrawGlowRect(drawList, min, max, venueColor, rounding, 0.16f);
-            ImGui.SetTooltip("Click to choose a venue image. Max 512x512 and 2 MB.");
-        }
+            ImGui.InvisibleButton("venue-profile-image", size);
+            if (ImGui.IsItemHovered())
+            {
+                DrawGlowRect(drawList, min, max, venueColor, rounding, 0.16f);
+                ImGui.SetTooltip("Click to choose a venue image. Max 512x512 and 2 MB.");
+            }
 
-        if (ImGui.IsItemClicked())
-            OpenImagePicker(venue);
+            if (ImGui.IsItemClicked())
+                OpenImagePicker(venue);
+        }
     }
 
     private void DrawVenueContextPopup(PrivateContact venue)
@@ -2041,9 +2565,15 @@ internal sealed class PrivacyWindow : Window, IDisposable
             ImGui.CloseCurrentPopup();
         }
 
-        if (ImGui.MenuItem("Edit localization"))
+        if (ImGui.MenuItem("Venue Discord"))
         {
-            OpenVenueLocationEditor(venue);
+            OpenVenueDiscord(venue);
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem("Opening/Close hours"))
+        {
+            OpenVenueHoursWindow(venue);
             ImGui.CloseCurrentPopup();
         }
 
@@ -2078,6 +2608,24 @@ internal sealed class PrivacyWindow : Window, IDisposable
         }
 
         ImGui.EndPopup();
+    }
+
+    private void OpenVenueDiscord(PrivateContact venue)
+    {
+        var url = venue.VenueDiscordUrl;
+        var catalog = ffxivVenuesService.FindBestMatch(venue.Name, venue.LastKnownZone);
+        if (string.IsNullOrWhiteSpace(url))
+            url = catalog?.DiscordUrl ?? string.Empty;
+
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            ffxivVenuesService.EnsureFreshAsync(true);
+            log.Warning("Privacy: no Discord link found for venue {VenueName}. The FFXIV Venues cache was refreshed; try the button again in a few seconds.", venue.Name);
+            return;
+        }
+
+        venue.VenueDiscordUrl = url;
+        OpenUrl(url);
     }
 
     private void OpenVenueLocationEditor(PrivateContact venue)
@@ -2120,6 +2668,164 @@ internal sealed class PrivacyWindow : Window, IDisposable
         DrawVenueLocationPopup();
         DrawVenueTeleportPopup();
         DrawVenueColorPopup();
+        DrawVenueOpeningHoursWindow();
+    }
+
+
+    private void OpenVenueHoursWindow(PrivateContact venue)
+    {
+        openingHoursVenue = venue;
+        openingHoursWindowOpen = true;
+    }
+
+    private void DrawVenueOpeningHoursWindow()
+    {
+        if (!openingHoursWindowOpen || openingHoursVenue == null)
+            return;
+
+        var venue = openingHoursVenue;
+        var catalog = ffxivVenuesService.FindBestMatch(venue.Name, venue.LastKnownZone);
+        var imageUrl = !string.IsNullOrWhiteSpace(venue.CloudAvatarUrl) ? venue.CloudAvatarUrl : catalog?.ImageUrl ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(venue.ProfileImagePath) && !string.IsNullOrWhiteSpace(imageUrl))
+            QueueVenueImageDownload(venue, imageUrl);
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var scheduleLines = catalog?.OpeningScheduleLines?.Where(line => !string.IsNullOrWhiteSpace(line)).Take(10).ToList() ?? new List<string>();
+        if (scheduleLines.Count == 0)
+        {
+            var opening = catalog?.OpeningTime ?? "Not listed";
+            var closing = catalog?.ClosingTime ?? string.Empty;
+            scheduleLines.Add(string.IsNullOrWhiteSpace(closing) || closing.Equals("Not listed", StringComparison.OrdinalIgnoreCase)
+                ? opening
+                : $"{opening} - {closing.Split(' ').LastOrDefault() ?? closing}");
+        }
+
+        var rows = Math.Max(1, (int)Math.Ceiling(scheduleLines.Count / 2f));
+        var panelHeight = (150f + Math.Max(0, rows - 1) * 21f) * scale;
+        var windowSize = new Vector2(430f, panelHeight / scale + 36f) * scale;
+        var mainPos = ImGui.GetWindowPos();
+        var mainSize = ImGui.GetWindowSize();
+        ImGui.SetNextWindowSize(windowSize, ImGuiCond.Always);
+        ImGui.SetNextWindowPos(mainPos + (mainSize - windowSize) * 0.5f, ImGuiCond.Appearing);
+        using var windowBg = ImRaii.PushColor(ImGuiCol.WindowBg, UiColors.WithAlpha(config.WindowBackgroundColor, 0.96f));
+        using var border = ImRaii.PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.38f));
+        if (!ImGui.Begin("Opening/Close hours###PrivacyVenueHours", ref openingHoursWindowOpen, ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoResize))
+        {
+            ImGui.End();
+            return;
+        }
+
+        WindowEdgeFade.DrawUnified(config.WindowBackgroundColor);
+        var drawList = ImGui.GetWindowDrawList();
+        var panelPos = ImGui.GetCursorScreenPos();
+        var panelSize = new Vector2(ImGui.GetContentRegionAvail().X, panelHeight);
+        var rounding = 7f * scale;
+
+        drawList.AddRectFilled(panelPos, panelPos + panelSize, Color(UiColors.WithAlpha(config.WindowBackgroundColor, 0.58f)), rounding);
+        drawList.AddRectFilled(panelPos, panelPos + panelSize, Color(UiColors.WithAlpha(config.BottomBarBackgroundColor, 0.18f)), rounding);
+        drawList.AddRect(panelPos, panelPos + panelSize, Color(UiColors.WithAlpha(config.AccentColor, 0.42f)), rounding, ImDrawFlags.None, 1f * scale);
+        DrawDotOverlay(drawList, panelPos, panelSize, UiColors.WithAlpha(config.AccentColor, 0.08f), scale);
+
+        var imageSize = new Vector2(128f, 128f) * scale;
+        var imagePos = panelPos + new Vector2(14f, 13f) * scale;
+        var texture = profileImages.GetTexture(venue.ProfileImagePath);
+        drawList.AddRectFilled(imagePos, imagePos + imageSize, Color(UiColors.WithAlpha(config.AccentColor, 0.12f)), 7f * scale);
+        if (texture != null)
+            drawList.AddImageRounded(texture.Handle, imagePos, imagePos + imageSize, Vector2.Zero, Vector2.One, Color(Vector4.One), 7f * scale);
+        else
+        {
+            using (ImRaii.PushFont(UiBuilder.IconFont))
+            {
+                var icon = FontAwesomeIcon.Home.ToIconString();
+                var size = ImGui.CalcTextSize(icon);
+                drawList.AddText(imagePos + (imageSize - size) * 0.5f, Color(UiColors.TextDim), icon);
+            }
+        }
+        drawList.AddRect(imagePos, imagePos + imageSize, Color(UiColors.WithAlpha(config.AccentColor, 0.45f)), 7f * scale, ImDrawFlags.None, 1f * scale);
+
+        var textPos = imagePos + new Vector2(imageSize.X + 14f * scale, 3f * scale);
+        var textWidth = MathF.Max(80f * scale, panelPos.X + panelSize.X - textPos.X - 12f * scale);
+        var location = FormatVenueLocationText(string.IsNullOrWhiteSpace(venue.LastKnownZone) ? catalog?.BuildFullLocation() ?? "Unknown location" : venue.LastKnownZone);
+        var openNow = catalog?.IsOpenNow == true;
+        var openLabel = openNow ? "Open" : "Closed";
+        var openLabelColor = openNow ? new Vector4(0.56f, 1.00f, 0.62f, 1f) : new Vector4(1.00f, 0.42f, 0.42f, 1f);
+
+        drawList.PushClipRect(textPos - new Vector2(1f, 1f) * scale, panelPos + panelSize - new Vector2(10f, 8f) * scale, true);
+        var stateWidth = GetScaledTextWidth(openLabel, 13.8f * scale) + 12f * scale;
+        var titleText = TrimToWidth(venue.Name, textWidth - stateWidth, 17f * scale);
+        DrawTextWithShadow(drawList, textPos, Color(config.AccentColor), titleText, 17f * scale);
+        var titleWidth = GetScaledTextWidth(titleText, 17f * scale);
+        DrawBoldTextWithShadow(drawList, textPos + new Vector2(titleWidth + 8f * scale, 1f * scale), Color(openLabelColor), openLabel, 13.8f * scale);
+        DrawTextWithShadow(drawList, textPos + new Vector2(0f, 25f) * scale, Color(UiColors.TextDim), TrimToWidth(location, textWidth, 13.5f * scale), 13.5f * scale);
+
+        var openingLabelPos = textPos + new Vector2(0f, 53f) * scale;
+        DrawTextWithShadow(drawList, openingLabelPos, Color(UiColors.TextDim), "Opening:", 13.5f * scale);
+        var columnWidth = (textWidth - 10f * scale) * 0.5f;
+        var firstLineY = openingLabelPos.Y + 22f * scale;
+        for (var i = 0; i < scheduleLines.Count; i++)
+        {
+            var column = i % 2;
+            var row = i / 2;
+            var linePos = new Vector2(textPos.X + column * (columnWidth + 10f * scale), firstLineY + row * 21f * scale);
+            DrawTextWithShadow(drawList, linePos, Color(UiColors.Text), TrimToWidth(scheduleLines[i], columnWidth, 13.1f * scale), 13.1f * scale);
+        }
+        drawList.PopClipRect();
+
+        ImGui.SetCursorScreenPos(openingLabelPos - new Vector2(0f, 1f * scale));
+        ImGui.InvisibleButton("##venue_hours_opening_tooltip", new Vector2(142f, 18f) * scale);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Local time");
+
+        ImGui.SetCursorScreenPos(panelPos + new Vector2(0f, panelSize.Y + 6f * scale));
+        ImGui.Dummy(Vector2.Zero);
+        ImGui.End();
+    }
+
+    private static void DrawDotOverlay(ImDrawListPtr drawList, Vector2 pos, Vector2 size, Vector4 color, float scale)
+    {
+        var dotColor = ImGui.GetColorU32(color);
+        var radius = 1.05f * scale;
+        var spacing = 18f * scale;
+        var inset = 10f * scale;
+
+        for (var y = pos.Y + inset; y < pos.Y + size.Y - inset; y += spacing)
+        {
+            for (var x = pos.X + inset; x < pos.X + size.X - inset; x += spacing)
+                drawList.AddCircleFilled(new Vector2(x, y), radius, dotColor, 6);
+        }
+    }
+
+    private static string TrimToWidth(string text, float maxWidth, float fontSize)
+    {
+        if (string.IsNullOrEmpty(text))
+            return string.Empty;
+        if (GetScaledTextWidth(text, fontSize) <= maxWidth)
+            return text;
+
+        const string suffix = "...";
+        var available = MathF.Max(0f, maxWidth - GetScaledTextWidth(suffix, fontSize));
+        var result = text;
+        while (result.Length > 0 && GetScaledTextWidth(result, fontSize) > available)
+            result = result[..^1];
+        return result + suffix;
+    }
+
+    private static float GetScaledTextWidth(string text, float fontSize)
+    {
+        var baseSize = MathF.Max(1f, ImGui.GetFontSize());
+        return ImGui.CalcTextSize(text).X * (fontSize / baseSize);
+    }
+
+    private static string FormatVenueLocationText(string text)
+    {
+        var value = (text ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        value = value.Replace(" / ", ", ", StringComparison.Ordinal);
+        value = value.Replace(" - ", ", ", StringComparison.Ordinal);
+        while (value.Contains(", ,", StringComparison.Ordinal))
+            value = value.Replace(", ,", ",", StringComparison.Ordinal);
+        return value;
     }
 
     private void DrawVenueLocationPopup()
@@ -2526,8 +3232,10 @@ internal sealed class PrivacyWindow : Window, IDisposable
             var rounding = 3f * scale;
 
             var rowColor = GetContactRowColor(contact, hovered, compactGroupsMode, rowIndex, groupRowColor);
+            var rowBackgroundMin = GetFullRowBackgroundMin(localMin);
+            var rowBackgroundMax = GetFullRowBackgroundMax(localMax);
             if (!config.HideUserRowBackground)
-                drawList.AddRectFilled(localMin, localMax, Color(rowColor), rounding);
+                DrawFullWidthRowFill(drawList, rowBackgroundMin, rowBackgroundMax, rowColor, rounding);
             HandleManualRowDrag(
                 compactGroupsMode ? "group" : "contact",
                 contact.Id,
@@ -2541,11 +3249,11 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
             var portraitBaseSize = GetPortraitSize(notebookMode, compactGroupsMode);
             var portraitSize = new Vector2(portraitBaseSize * scale);
-            var portraitPos = localMin + new Vector2(6f, minimalMode ? 6f : 8f) * scale;
+            var portraitPos = localMin + new Vector2(5f, minimalMode ? 4f : 4f) * scale;
             ImGui.SetCursorScreenPos(portraitPos);
             DrawProfileSquare(contact, portraitSize);
 
-            var textLeft = localMin.X + (portraitBaseSize + 14f) * scale;
+            var textLeft = localMin.X + (portraitBaseSize + 10f) * scale;
             var textRight = localMax.X - 7f * scale;
             var textWidth = textRight - textLeft;
 
@@ -2565,7 +3273,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
             if (!config.HideUserRowBackground && contact.Status == ContactStatus.Offline)
             {
-                drawList.AddRectFilled(localMin, localMax, Color(new Vector4(0f, 0f, 0f, hovered ? 0.18f : 0.28f)), rounding);
+                DrawFullWidthRowFill(drawList, rowBackgroundMin, rowBackgroundMax, new Vector4(0f, 0f, 0f, hovered ? 0.18f : 0.28f), rounding);
             }
 
             if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
@@ -2574,7 +3282,27 @@ internal sealed class PrivacyWindow : Window, IDisposable
             DrawContactContextPopup(contact);
         }
 
-        DrawRowDivider(rowStart.X + 6f * scale, rowEnd.X - 6f * scale, rowEnd.Y - 1f * scale, compactGroupsMode ? config.AccentColor : config.AccentColor, 0.23f);
+        if (!config.HideDivisors)
+            DrawRowDivider(rowStart.X, rowEnd.X, rowEnd.Y - 1f * scale, compactGroupsMode ? config.AccentColor : config.AccentColor, 0.23f);
+    }
+
+    private Vector2 GetFullRowBackgroundMin(Vector2 rowMin)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        return new Vector2(windowClipMin.X + 19f * scale, rowMin.Y);
+    }
+
+    private Vector2 GetFullRowBackgroundMax(Vector2 rowMax)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        return new Vector2(windowClipMax.X - 19f * scale, rowMax.Y);
+    }
+
+    private void DrawFullWidthRowFill(ImDrawListPtr drawList, Vector2 min, Vector2 max, Vector4 color, float rounding)
+    {
+        drawList.PushClipRect(windowClipMin, windowClipMax, false);
+        drawList.AddRectFilled(min, max, Color(color), rounding);
+        drawList.PopClipRect();
     }
 
     private float GetContactRowHeight(bool notebookMode, bool compactGroupsMode)
@@ -2630,6 +3358,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
            openVenueTeleportPopup ||
            openVenueColorPopup ||
            openMissingLifestreamPopup ||
+           openingHoursWindowOpen ||
+           venueSuggestionDropdownOpen ||
            settingsWindow.IsOpen ||
            estateTeleportWindow.IsOpen ||
            contactProfileWindow.IsOpen ||
@@ -2970,7 +3700,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         {
             var statusPos = new Vector2(pos.X, currentY);
             drawList.PushClipRect(statusPos - new Vector2(0f, 1f * scale), new Vector2(statusPos.X + safeWidth, statusPos.Y + 16f * scale), true);
-            DrawTextWithShadow(drawList, statusPos, Color(Alpha(config.AccentColor, 0.82f)), contact.CloudStatusMessage.Trim(), 12.8f * scale);
+            DrawTextWithShadow(drawList, statusPos, Color(ResolveStatusMessageColor(contact)), contact.CloudStatusMessage.Trim(), 12.8f * scale);
             drawList.PopClipRect();
             currentY += 15f * scale;
         }
@@ -3077,7 +3807,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
         DrawTargetContactButton(contact, targetPos, targetSize);
         DrawStatusNotificationToggle(contact, notifyPos, notifySize);
 
-        var starMaxX = (contact.CloudAccountLinked ? cloudIconPos.X : targetPos.X) - 15f * scale;
+        var actionIconStartX = contact.CloudAccountLinked ? cloudIconPos.X : targetPos.X;
+        var starMaxX = actionIconStartX - 15f * scale;
         var starX = MathF.Min(cursorX + 1.5f * scale, starMaxX);
         var starPos = new Vector2(starX, centerY - 4.8f * scale);
         using (ImRaii.PushFont(UiBuilder.IconFont))
@@ -3094,6 +3825,18 @@ internal sealed class PrivacyWindow : Window, IDisposable
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip(contact.Favorite ? "Remove favorite" : "Add favorite");
+
+        var venueName = ResolveVenueNameForContact(contact);
+        if (!string.IsNullOrWhiteSpace(venueName))
+        {
+            var venueText = $"@At {venueName}";
+            var venueFontSize = 12.6f * scale;
+            var venuePos = new Vector2(starPos.X + 16f * scale, pos.Y + 2.8f * scale);
+            var venueMaxX = MathF.Max(venuePos.X, actionIconStartX - 4f * scale);
+            drawList.PushClipRect(venuePos - new Vector2(0f, 1f * scale), new Vector2(venueMaxX, venuePos.Y + 17f * scale), true);
+            DrawTextWithShadow(drawList, venuePos, Color(Alpha(config.AccentColor, 0.82f)), venueText, venueFontSize);
+            drawList.PopClipRect();
+        }
     }
 
 
@@ -3335,7 +4078,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         x += buttonWidth + spacing;
         DrawActionButton(FontAwesomeIcon.Users, "Party", UiColors.CyanHover, new Vector2(buttonWidth, buttonHeight), () => InviteParty(contact), x, pos.Y);
         x += buttonWidth + spacing;
-        DrawActionButton(FontAwesomeIcon.Compass, "Teleport to user", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => TravelTo(contact), x, pos.Y);
+        DrawActionButton(char.ConvertFromUtf32(0xE554), "Teleport to user", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => TravelTo(contact), x, pos.Y);
         x += buttonWidth + spacing;
         DrawActionButton(FontAwesomeIcon.Home, "Estate Teleportation", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => estateTeleportWindow.Open(contact), x, pos.Y);
         x += buttonWidth + spacing;
@@ -3344,26 +4087,34 @@ internal sealed class PrivacyWindow : Window, IDisposable
         DrawActionButton(FontAwesomeIcon.Book, "Notes", UiColors.BrownHover, new Vector2(buttonWidth, buttonHeight), () => notesWindow.Open(contact), x, pos.Y);
     }
 
-    private void DrawActionButton(FontAwesomeIcon icon, string tooltip, Vector4 hoverColor, Vector2 size, Action click, float x, float y)
+    private void DrawActionButton(FontAwesomeIcon icon, string tooltip, Vector4 hoverColor, Vector2 size, Action click, float x, float y, bool inputDisabled = false)
+        => DrawActionButton(icon.ToIconString(), tooltip, hoverColor, size, click, x, y, inputDisabled);
+
+    private void DrawActionButton(string iconText, string tooltip, Vector4 hoverColor, Vector2 size, Action click, float x, float y, bool inputDisabled = false)
     {
         ImGui.SetCursorScreenPos(new Vector2(x, y));
         var drawList = ImGui.GetWindowDrawList();
         var scale = ImGuiHelpers.GlobalScale;
-        var clicked = ImGui.InvisibleButton(tooltip, size);
-        var min = ImGui.GetItemRectMin();
-        var max = ImGui.GetItemRectMax();
-        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
-        var active = ImGui.IsItemActive();
+        var min = new Vector2(x, y);
+        var max = min + size;
+        var clicked = false;
+        var hovered = false;
+        var active = false;
+        if (!inputDisabled)
+        {
+            clicked = ImGui.InvisibleButton(tooltip, size);
+            min = ImGui.GetItemRectMin();
+            max = ImGui.GetItemRectMax();
+            hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+            active = ImGui.IsItemActive();
+        }
         var rounding = 5f * scale;
 
         if (IsCustomMainBackgroundActive())
             DrawSoftShadowRect(drawList, min, max, rounding, 0.18f);
 
-        // Keep the action hitbox, but draw no button background.
-        // This keeps the Contacts list visually clean while preserving click/hover behavior.
         using (ImRaii.PushFont(UiBuilder.IconFont))
         {
-            var iconText = icon.ToIconString();
             var iconFontSize = 14.9f * scale;
             var iconSize = ImGui.CalcTextSize(iconText) * (iconFontSize / MathF.Max(1f, ImGui.GetFontSize()));
             var iconPos = min + (size - iconSize) * 0.5f;
@@ -3420,25 +4171,78 @@ internal sealed class PrivacyWindow : Window, IDisposable
                 : "Click to choose a profile image. Max 512x512 and 2 MB.");
         }
 
+        var statusCenter = max - new Vector2(7.5f, 7.5f) * ImGuiHelpers.GlobalScale;
+        var statusRadius = 8.5f * ImGuiHelpers.GlobalScale;
+        if (ImGui.IsMouseHoveringRect(statusCenter - new Vector2(statusRadius), statusCenter + new Vector2(statusRadius)))
+            ImGui.SetTooltip(GetStatusDisplayName(contact.Status));
+
         if (ImGui.IsItemClicked() && !cloudManaged)
             OpenImagePicker(contact);
     }
 
     private void DrawProfileStatusOverlay(PrivateContact contact, Vector2 min, Vector2 max)
     {
+        var scale = ImGuiHelpers.GlobalScale;
+        var center = max - new Vector2(7.5f, 7.5f) * scale;
+        DrawStatusBadge(contact.Status, center, 4.8f * scale, true);
+    }
+
+    private void DrawStatusBadge(ContactStatus status, Vector2 center, float radius, bool largeMoon)
+    {
         var drawList = ImGui.GetWindowDrawList();
         var scale = ImGuiHelpers.GlobalScale;
-        var statusColor = contact.Status switch
+
+        var statusIcon = GetStatusIcon(status);
+        if (!string.IsNullOrEmpty(statusIcon))
+        {
+            using (ImRaii.PushFont(UiBuilder.IconFont))
+            {
+                var fontSize = MathF.Max(9.2f * scale, radius * (largeMoon ? 2.35f : 2.16f));
+                var iconSize = ImGui.CalcTextSize(statusIcon) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+                var iconPos = center - iconSize * 0.5f + new Vector2(0f, -0.2f * scale);
+                drawList.AddText(UiBuilder.IconFont, fontSize, iconPos, Color(GetStatusColor(status)), statusIcon);
+            }
+            return;
+        }
+
+        drawList.AddCircleFilled(center, radius + 1.9f * scale, Color(new Vector4(0.010f, 0.018f, 0.015f, 0.96f)), 18);
+        drawList.AddCircleFilled(center, radius, Color(GetStatusColor(status)), 18);
+        drawList.AddCircle(center, radius + 0.6f * scale, Color(Alpha(Vector4.One, 0.20f)), 18, 1f * scale);
+    }
+
+    private static string GetStatusIcon(ContactStatus status)
+        => status switch
+        {
+            ContactStatus.Idle => char.ConvertFromUtf32(0xF186),
+            ContactStatus.Afk => char.ConvertFromUtf32(0xF2F2),
+            ContactStatus.Content => char.ConvertFromUtf32(0xF11B),
+            ContactStatus.Streaming => char.ConvertFromUtf32(0xF590),
+            _ => string.Empty,
+        };
+
+    private static Vector4 GetStatusColor(ContactStatus status)
+        => status switch
         {
             ContactStatus.Busy => UiColors.Busy,
+            ContactStatus.Idle => new Vector4(1.00f, 0.80f, 0.23f, 1f),
+            ContactStatus.Afk => new Vector4(1.00f, 0.34f, 0.34f, 1f),
+            ContactStatus.Content => new Vector4(0.18f, 0.88f, 1.00f, 1f),
+            ContactStatus.Streaming => new Vector4(0.78f, 0.56f, 1.00f, 1f),
             ContactStatus.Online => UiColors.Online,
             _ => UiColors.Offline,
         };
-        var center = max - new Vector2(7.5f, 7.5f) * scale;
-        drawList.AddCircleFilled(center, 6.7f * scale, Color(new Vector4(0.010f, 0.018f, 0.015f, 0.96f)), 18);
-        drawList.AddCircleFilled(center, 4.8f * scale, Color(statusColor), 18);
-        drawList.AddCircle(center, 5.4f * scale, Color(Alpha(Vector4.One, 0.20f)), 18, 1f * scale);
-    }
+
+    private static string GetStatusDisplayName(ContactStatus status)
+        => status switch
+        {
+            ContactStatus.Afk => "AFK",
+            ContactStatus.Idle => "Idle",
+            ContactStatus.Busy => "Busy",
+            ContactStatus.Content => "Content",
+            ContactStatus.Streaming => "Streaming",
+            ContactStatus.Online => "Online",
+            _ => "Offline",
+        };
 
     private void DrawTopSummaryPanel()
     {
@@ -3460,6 +4264,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var borderPad = 1f * scale;
         var barFill = Alpha(config.WindowBackgroundColor, MathF.Max(0.92f, config.WindowBackgroundColor.W));
         var barOverlay = config.TopBarBackgroundColor;
+
         drawList.AddRectFilled(pos - new Vector2(borderPad, borderPad), pos + size + new Vector2(borderPad, borderPad), Color(barFill), rounding + borderPad);
         drawList.AddRectFilled(pos, pos + size, Color(barOverlay), rounding);
         drawList.AddRect(pos, pos + size, Color(Alpha(config.AccentColor, 0.28f)), rounding, ImDrawFlags.None, 1f * scale);
@@ -3514,10 +4319,21 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var collapseFill = hoveredCollapse ? Alpha(config.AccentColor, 0.24f) : Alpha(UiColors.Get("ButtonDefault"), 0.20f);
         drawList.AddRectFilled(collapsePos, collapsePos + closeSize, Color(collapseFill), 4f * scale);
         drawList.AddRect(collapsePos, collapsePos + closeSize, Color(Alpha(hoveredCollapse ? config.AccentColor : UiColors.TextDim, hoveredCollapse ? 0.58f : 0.22f)), 4f * scale, ImDrawFlags.None, scale);
-        var collapseText = config.WindowCollapsed ? "+" : "-";
+        var collapseText = config.WindowCollapsed ? "+" : char.ConvertFromUtf32(0xF068);
         var collapseFontSize = 13.2f * scale;
-        var collapseTextSize = ImGui.CalcTextSize(collapseText) * (collapseFontSize / MathF.Max(1f, ImGui.GetFontSize()));
-        DrawTextWithShadow(drawList, collapsePos + (closeSize - collapseTextSize) * 0.5f, Color(hoveredCollapse ? config.AccentColor : UiColors.TextDim), collapseText, collapseFontSize);
+        if (config.WindowCollapsed)
+        {
+            var collapseTextSize = ImGui.CalcTextSize(collapseText) * (collapseFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            DrawTextWithShadow(drawList, collapsePos + (closeSize - collapseTextSize) * 0.5f, Color(hoveredCollapse ? config.AccentColor : UiColors.TextDim), collapseText, collapseFontSize);
+        }
+        else
+        {
+            using (ImRaii.PushFont(UiBuilder.IconFont))
+            {
+                var collapseTextSize = ImGui.CalcTextSize(collapseText) * (collapseFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+                drawList.AddText(UiBuilder.IconFont, collapseFontSize, collapsePos + (closeSize - collapseTextSize) * 0.5f, Color(hoveredCollapse ? config.AccentColor : UiColors.TextDim), collapseText);
+            }
+        }
         if (hoveredCollapse)
             ImGui.SetTooltip(config.WindowCollapsed ? "Expand Privacy" : "Collapse Privacy");
 
@@ -3529,10 +4345,13 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var closeFill = hoveredClose ? Alpha(UiColors.Busy, 0.25f) : Alpha(UiColors.Get("ButtonDefault"), 0.20f);
         drawList.AddRectFilled(closePos, closePos + closeSize, Color(closeFill), 4f * scale);
         drawList.AddRect(closePos, closePos + closeSize, Color(Alpha(hoveredClose ? UiColors.Busy : UiColors.TextDim, hoveredClose ? 0.58f : 0.22f)), 4f * scale, ImDrawFlags.None, scale);
-        var closeText = "X";
+        var closeText = char.ConvertFromUtf32(0xF00D);
         var closeFontSize = 12.6f * scale;
-        var closeTextSize = ImGui.CalcTextSize(closeText) * (closeFontSize / MathF.Max(1f, ImGui.GetFontSize()));
-        DrawTextWithShadow(drawList, closePos + (closeSize - closeTextSize) * 0.5f, Color(hoveredClose ? UiColors.Busy : UiColors.TextDim), closeText, closeFontSize);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var closeTextSize = ImGui.CalcTextSize(closeText) * (closeFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            drawList.AddText(UiBuilder.IconFont, closeFontSize, closePos + (closeSize - closeTextSize) * 0.5f, Color(hoveredClose ? UiColors.Busy : UiColors.TextDim), closeText);
+        }
         if (hoveredClose)
             ImGui.SetTooltip("Close Privacy");
 
@@ -3574,7 +4393,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
             return;
 
         var scale = ImGuiHelpers.GlobalScale;
-        var drawList = ImGui.GetWindowDrawList();
+        var drawList = ImGui.GetForegroundDrawList();
         var pos = topSummaryPanelPos;
         var size = topSummaryPanelSize;
         var height = size.Y;
@@ -3590,6 +4409,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
         var barFill = Alpha(config.WindowBackgroundColor, MathF.Max(0.92f, config.WindowBackgroundColor.W));
         var barOverlay = config.TopBarBackgroundColor;
+
         drawList.AddRectFilled(pos - new Vector2(borderPad, borderPad), pos + size + new Vector2(borderPad, borderPad), Color(barFill), rounding + borderPad);
         drawList.AddRectFilled(pos, pos + size, Color(barOverlay), rounding);
         drawList.AddRect(pos, pos + size, Color(Alpha(config.AccentColor, 0.32f)), rounding, ImDrawFlags.None, 1f * scale);
@@ -3632,19 +4452,33 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var collapseFill = hoveredCollapse ? Alpha(config.AccentColor, 0.24f) : Alpha(UiColors.Get("ButtonDefault"), 0.20f);
         drawList.AddRectFilled(collapsePos, collapsePos + closeSize, Color(collapseFill), 4f * scale);
         drawList.AddRect(collapsePos, collapsePos + closeSize, Color(Alpha(hoveredCollapse ? config.AccentColor : UiColors.TextDim, hoveredCollapse ? 0.58f : 0.22f)), 4f * scale, ImDrawFlags.None, scale);
-        var collapseText = config.WindowCollapsed ? "+" : "-";
+        var collapseText = config.WindowCollapsed ? "+" : char.ConvertFromUtf32(0xF068);
         var collapseFontSize = 13.2f * scale;
-        var collapseTextSize = ImGui.CalcTextSize(collapseText) * (collapseFontSize / MathF.Max(1f, ImGui.GetFontSize()));
-        DrawTextWithShadow(drawList, collapsePos + (closeSize - collapseTextSize) * 0.5f, Color(hoveredCollapse ? config.AccentColor : UiColors.TextDim), collapseText, collapseFontSize);
+        if (config.WindowCollapsed)
+        {
+            var collapseTextSize = ImGui.CalcTextSize(collapseText) * (collapseFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            DrawTextWithShadow(drawList, collapsePos + (closeSize - collapseTextSize) * 0.5f, Color(hoveredCollapse ? config.AccentColor : UiColors.TextDim), collapseText, collapseFontSize);
+        }
+        else
+        {
+            using (ImRaii.PushFont(UiBuilder.IconFont))
+            {
+                var collapseTextSize = ImGui.CalcTextSize(collapseText) * (collapseFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+                drawList.AddText(UiBuilder.IconFont, collapseFontSize, collapsePos + (closeSize - collapseTextSize) * 0.5f, Color(hoveredCollapse ? config.AccentColor : UiColors.TextDim), collapseText);
+            }
+        }
 
         var hoveredClose = topSummaryPanelCloseHovered;
         var closeFill = hoveredClose ? Alpha(UiColors.Busy, 0.25f) : Alpha(UiColors.Get("ButtonDefault"), 0.20f);
         drawList.AddRectFilled(closePos, closePos + closeSize, Color(closeFill), 4f * scale);
         drawList.AddRect(closePos, closePos + closeSize, Color(Alpha(hoveredClose ? UiColors.Busy : UiColors.TextDim, hoveredClose ? 0.58f : 0.22f)), 4f * scale, ImDrawFlags.None, scale);
-        var closeText = "X";
+        var closeText = char.ConvertFromUtf32(0xF00D);
         var closeFontSize = 12.6f * scale;
-        var closeTextSize = ImGui.CalcTextSize(closeText) * (closeFontSize / MathF.Max(1f, ImGui.GetFontSize()));
-        DrawTextWithShadow(drawList, closePos + (closeSize - closeTextSize) * 0.5f, Color(hoveredClose ? UiColors.Busy : UiColors.TextDim), closeText, closeFontSize);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var closeTextSize = ImGui.CalcTextSize(closeText) * (closeFontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            drawList.AddText(UiBuilder.IconFont, closeFontSize, closePos + (closeSize - closeTextSize) * 0.5f, Color(hoveredClose ? UiColors.Busy : UiColors.TextDim), closeText);
+        }
 
         drawList.PopClipRect();
     }
@@ -3956,8 +4790,10 @@ internal sealed class PrivacyWindow : Window, IDisposable
         if (gradientBottom <= gradientTop)
             return;
 
-        var min = new Vector2(ImGui.GetWindowPos().X + ImGui.GetWindowContentRegionMin().X, gradientTop);
-        var max = new Vector2(min.X + windowContentWidth, gradientBottom);
+        var minX = hasMainBackgroundBounds ? mainBackgroundMin.X : ImGui.GetWindowPos().X + ImGui.GetWindowContentRegionMin().X;
+        var maxX = hasMainBackgroundBounds ? mainBackgroundMax.X : minX + windowContentWidth;
+        var min = new Vector2(minX, gradientTop);
+        var max = new Vector2(maxX, gradientBottom);
         var gradientTint = Lighten(config.WindowBackgroundColor, 0.035f);
         drawList.AddRectFilledMultiColor(
             min,
@@ -4105,6 +4941,14 @@ internal sealed class PrivacyWindow : Window, IDisposable
             drawList.AddText(UiBuilder.IconFont, 13f * scale, min + new Vector2(8f, 7f) * scale, Color(UiColors.TextDim), iconText);
         DrawTextWithShadow(drawList, min + new Vector2(29f, 5.5f) * scale, Color(UiColors.TextDim), label, 13f * scale);
         return clicked;
+    }
+
+    private void DrawBoldTextWithShadow(ImDrawListPtr drawList, Vector2 pos, uint color, string text, float? fontSize = null)
+    {
+        var size = fontSize ?? ImGui.GetFontSize();
+        var px = MathF.Max(0.55f, 0.55f * ImGuiHelpers.GlobalScale);
+        DrawTextWithShadow(drawList, pos, color, text, size);
+        DrawTextWithShadow(drawList, pos + new Vector2(px, 0f), color, text, size);
     }
 
     private void DrawTextWithShadow(ImDrawListPtr drawList, Vector2 pos, uint color, string text, float? fontSize = null)
@@ -4854,6 +5698,9 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private Vector4 ResolveTagColor(PrivateContact contact)
         => UiColors.WithAlpha(UiColors.HexToRgba(NormalizeHex(contact.TagColorHex, "#FFD56A")), 1f);
 
+    private Vector4 ResolveStatusMessageColor(PrivateContact contact)
+        => UiColors.WithAlpha(UiColors.HexToRgba(NormalizeHex(contact.CloudStatusColorHex, HexFromColor(config.AccentColor))), 1f);
+
     private static string HexFromColor(Vector4 color)
     {
         var r = Math.Clamp((int)MathF.Round(color.X * 255f), 0, 255);
@@ -4889,18 +5736,14 @@ internal sealed class PrivacyWindow : Window, IDisposable
     }
 
     private string FormatContactLocation(PrivateContact contact)
-    {
-        var location = BuildLocationLine(contact);
-        var venueName = ResolveVenueNameForContact(contact);
-        return string.IsNullOrWhiteSpace(venueName) ? location : $"{location} @At {venueName}";
-    }
+        => BuildLocationLine(contact);
 
     private static string BuildLocationLine(PrivateContact contact)
     {
         var parts = new List<string>();
         AddLocationPart(parts, string.IsNullOrWhiteSpace(contact.CurrentDataCenter) ? contact.DataCenter : contact.CurrentDataCenter);
         AddLocationPart(parts, string.IsNullOrWhiteSpace(contact.CurrentWorld) ? contact.World : contact.CurrentWorld);
-        AddLocationPart(parts, contact.LastKnownZone);
+        AddLocationParts(parts, contact.LastKnownZone);
 
         foreach (var part in NormalizeResidentialParts(contact.ResidentialDetails))
             AddLocationPart(parts, part);
@@ -4908,17 +5751,43 @@ internal sealed class PrivacyWindow : Window, IDisposable
         return parts.Count == 0 ? "Unknown location" : string.Join(" - ", parts);
     }
 
+    private static void AddLocationParts(List<string> parts, string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return;
+
+        foreach (var part in value.Split(" - ", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            AddLocationPart(parts, part);
+    }
+
+    private static string NormalizeLocationDisplayPart(string value)
+    {
+        var text = value.Trim();
+        if (string.IsNullOrWhiteSpace(text))
+            return string.Empty;
+
+        text = text.Replace("The Lavender Beds", "Lavender Beds", StringComparison.OrdinalIgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
+        return text;
+    }
+
     private static void AddLocationPart(List<string> parts, string value)
     {
         if (string.IsNullOrWhiteSpace(value))
             return;
 
-        var normalized = value.Trim();
+        var normalized = NormalizeLocationDisplayPart(value);
         if (normalized.StartsWith("Unknown ", StringComparison.OrdinalIgnoreCase))
             return;
 
-        if (!parts.Any(existing => string.Equals(existing, normalized, StringComparison.OrdinalIgnoreCase)))
-            parts.Add(normalized);
+        if (parts.Any(existing => string.Equals(existing, normalized, StringComparison.OrdinalIgnoreCase)))
+            return;
+
+        if (parts.Any(existing => existing.Split(" - ", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Any(piece => string.Equals(piece, normalized, StringComparison.OrdinalIgnoreCase))))
+            return;
+
+        parts.Add(normalized);
     }
 
     private static IEnumerable<string> NormalizeResidentialParts(string residentialDetails)
@@ -4945,9 +5814,12 @@ internal sealed class PrivacyWindow : Window, IDisposable
         if (string.IsNullOrWhiteSpace(text))
             return string.Empty;
 
+        text = text.Replace("The Lavender Beds", "Lavender Beds", StringComparison.OrdinalIgnoreCase);
         text = text.Replace(",", " ", StringComparison.OrdinalIgnoreCase);
         text = System.Text.RegularExpressions.Regex.Replace(text, @"\bWard\s+(\d+)\b", "w$1", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         text = System.Text.RegularExpressions.Regex.Replace(text, @"\bPlot\s+(\d+)\b", "p$1", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bw\s+(\d+)\b", "w$1", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bp\s+(\d+)\b", "p$1", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
         return text;
     }
@@ -4963,7 +5835,18 @@ internal sealed class PrivacyWindow : Window, IDisposable
             .Where(v => !string.IsNullOrWhiteSpace(v.Address));
 
         var match = allVenues.FirstOrDefault(v => string.Equals(NormalizeVenueAddress(v.Address), NormalizeVenueAddress(address), StringComparison.OrdinalIgnoreCase));
-        return match?.Name ?? string.Empty;
+        if (match != null)
+            return match.Name;
+
+        var dataCenter = string.IsNullOrWhiteSpace(contact.CurrentDataCenter) ? contact.DataCenter : contact.CurrentDataCenter;
+        var world = string.IsNullOrWhiteSpace(contact.CurrentWorld) ? contact.World : contact.CurrentWorld;
+        var district = ResolveResidentialDistrictForCommand(contact);
+        var wardText = ExtractHousingNumber(contact.ResidentialDetails, "Ward", "w");
+        var plotText = ExtractHousingNumber(contact.ResidentialDetails, "Plot", "p");
+        if (int.TryParse(wardText, out var ward) && int.TryParse(plotText, out var plot))
+            return ffxivVenuesService.FindByAddress(dataCenter, world, district, ward, plot)?.Name ?? string.Empty;
+
+        return string.Empty;
     }
 
     private string BuildContactVenueAddress(PrivateContact contact)
@@ -4971,8 +5854,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var dataCenter = string.IsNullOrWhiteSpace(contact.CurrentDataCenter) ? contact.DataCenter : contact.CurrentDataCenter;
         var world = string.IsNullOrWhiteSpace(contact.CurrentWorld) ? contact.World : contact.CurrentWorld;
         var district = ResolveResidentialDistrictForCommand(contact);
-        var ward = ExtractNumberAfter(contact.ResidentialDetails, "Ward");
-        var plot = ExtractNumberAfter(contact.ResidentialDetails, "Plot");
+        var ward = ExtractHousingNumber(contact.ResidentialDetails, "Ward", "w");
+        var plot = ExtractHousingNumber(contact.ResidentialDetails, "Plot", "p");
 
         if (string.IsNullOrWhiteSpace(dataCenter) || string.IsNullOrWhiteSpace(world) ||
             string.IsNullOrWhiteSpace(district) || string.IsNullOrWhiteSpace(ward) || string.IsNullOrWhiteSpace(plot))
@@ -5001,17 +5884,41 @@ internal sealed class PrivacyWindow : Window, IDisposable
         return string.Empty;
     }
 
+    private static string ExtractHousingNumber(string text, string longMarker, string shortMarker)
+    {
+        var value = ExtractNumberAfter(text, longMarker);
+        return string.IsNullOrWhiteSpace(value) ? ExtractNumberAfter(text, shortMarker) : value;
+    }
+
     private static string ExtractNumberAfter(string text, string marker)
     {
-        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
-        var index = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-        if (index < 0) return string.Empty;
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(marker)) return string.Empty;
 
-        index += marker.Length;
-        while (index < text.Length && !char.IsDigit(text[index])) index++;
-        var start = index;
-        while (index < text.Length && char.IsDigit(text[index])) index++;
-        return index > start ? text[start..index] : string.Empty;
+        var comparison = StringComparison.OrdinalIgnoreCase;
+        var index = -1;
+        while (true)
+        {
+            index = text.IndexOf(marker, index + 1, comparison);
+            if (index < 0) return string.Empty;
+
+            var isShortMarker = marker.Length == 1;
+            var validPrefix = !isShortMarker || index == 0 || !char.IsLetterOrDigit(text[index - 1]);
+            if (!validPrefix)
+                continue;
+
+            var numberStart = index + marker.Length;
+            while (numberStart < text.Length && !char.IsDigit(text[numberStart]))
+                numberStart++;
+
+            if (numberStart >= text.Length)
+                continue;
+
+            var numberEnd = numberStart;
+            while (numberEnd < text.Length && char.IsDigit(text[numberEnd]))
+                numberEnd++;
+
+            return text[numberStart..numberEnd];
+        }
     }
 
     private static string NormalizeVenueAddress(string value)

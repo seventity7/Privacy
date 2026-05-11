@@ -36,11 +36,13 @@ public sealed class PrivateContact
     public string TagColorHex { get; set; } = "#FFD56A";
     public string VenueColorHex { get; set; } = "#2BE5B5";
     public string VenueTeleportCommand { get; set; } = string.Empty;
+    public string VenueDiscordUrl { get; set; } = string.Empty;
     public string CloudProfileId { get; set; } = string.Empty;
     public bool CloudAccountLinked { get; set; }
     public string CloudDisplayName { get; set; } = string.Empty;
     public string CloudAvatarUrl { get; set; } = string.Empty;
     public string CloudStatusMessage { get; set; } = string.Empty;
+    public string CloudStatusColorHex { get; set; } = "#2BE5B5";
     public string CloudBio { get; set; } = string.Empty;
     public List<PrivateVenueBookmark> CloudVenues { get; set; } = new();
     public bool CloudManagedProfileImage { get; set; }

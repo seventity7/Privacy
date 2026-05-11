@@ -19,6 +19,9 @@ public sealed class Configuration : IPluginConfiguration
     public List<PrivateGroup> Groups = new();
     public List<PrivacyEvent> History = new();
     public List<PrivateVenueBookmark> CloudSavedVenues = new();
+    public bool ShowFavoriteVenuesOnProfile = true;
+    public string FavoriteVenueTooltipTag = string.Empty;
+    public string FavoriteVenueTooltipTagColorHex = "#B56CFF";
 
     public bool EnableContextMenu = true;
     public bool OpenWindowAfterAdd = true;
@@ -34,11 +37,13 @@ public sealed class Configuration : IPluginConfiguration
     public bool HideTopBar = false;
     public bool HideUserRowBackground = false;
     public bool HideVenuesRowBackground = false;
+    public bool HideDivisors = false;
+    public bool HideVenuesDivisor = false;
     public bool CloudEnabled = true;
     public bool CloudAutoSync = true;
     public bool CloudHeartbeatEnabled = true;
     public bool CloudProfileLookupEnabled = true;
-    public string CloudApiBaseUrl = "https://REMOVED_PRIVACY_CLOUD_API_URL";
+    public string CloudApiBaseUrl = string.Empty;
     public string CloudAccessToken = string.Empty;
     public string CloudRefreshToken = string.Empty;
     public string CloudUserId = string.Empty;
@@ -46,9 +51,11 @@ public sealed class Configuration : IPluginConfiguration
     public string CloudProfileDisplayName = string.Empty;
     public string CloudProfileBio = string.Empty;
     public string CloudProfileStatusMessage = string.Empty;
+    public string CloudProfileStatusColorHex = "#2BE5B5";
     public string CloudProfileAvatarUrl = string.Empty;
     public string CloudProfileAvatarLocalPath = string.Empty;
     public string CloudProfileTag = string.Empty;
+    public ContactStatus CloudPresenceStatus = ContactStatus.Online;
     public string CloudAccountProvider = string.Empty;
     public string CloudLinkedCharacterName = string.Empty;
     public string CloudLinkedWorld = string.Empty;
