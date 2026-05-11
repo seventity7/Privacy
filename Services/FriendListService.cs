@@ -116,9 +116,9 @@ internal sealed unsafe class FriendListService
     {
         var ward = ExtractNumberAfter(zoneName, "Ward");
         var plot = ExtractNumberAfter(zoneName, "Plot");
-        if (!string.IsNullOrWhiteSpace(ward) && !string.IsNullOrWhiteSpace(plot)) return $"Ward {ward}, Plot {plot}";
-        if (!string.IsNullOrWhiteSpace(ward)) return $"Ward {ward}";
-        if (!string.IsNullOrWhiteSpace(plot)) return $"Plot {plot}";
+        if (!string.IsNullOrWhiteSpace(ward) && !string.IsNullOrWhiteSpace(plot)) return $"w{ward} - p{plot}";
+        if (!string.IsNullOrWhiteSpace(ward)) return $"w{ward}";
+        if (!string.IsNullOrWhiteSpace(plot)) return $"p{plot}";
         return string.Empty;
     }
 
