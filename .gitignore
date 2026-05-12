@@ -7,7 +7,6 @@ obj/
 *.tmp
 *.log
 *.env
-*.sln
 .env
 appsettings*.json
 secrets.json
