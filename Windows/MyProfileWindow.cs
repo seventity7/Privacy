@@ -693,7 +693,8 @@ internal sealed class MyProfileWindow : Window
         if (venue == null)
             return;
 
-        var bookmark = FfxivVenuesService.ToBookmark(venue);
+        var bookmark = FfxivVenuesService.ToBookmark(venue, favorite: true);
+        bookmark.Favorite = true;
         bookmark.TooltipTag = favoriteVenueTagBuffer;
         bookmark.TooltipTagColorHex = NormalizeHex(favoriteVenueTagColorHex, "#B56CFF");
         var existing = config.CloudSavedVenues.FirstOrDefault(v =>
@@ -717,6 +718,7 @@ internal sealed class MyProfileWindow : Window
             existing.ImageUrl = bookmark.ImageUrl;
             existing.WebsiteUrl = bookmark.WebsiteUrl;
             existing.TeleportCommand = bookmark.TeleportCommand;
+            existing.Favorite = true;
             existing.Source = bookmark.Source;
             existing.TooltipTag = favoriteVenueTagBuffer;
             existing.TooltipTagColorHex = NormalizeHex(favoriteVenueTagColorHex, "#B56CFF");

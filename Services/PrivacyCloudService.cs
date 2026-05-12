@@ -594,7 +594,7 @@ internal sealed class PrivacyCloudService : IDisposable
         config.CloudProfileStatusColorHex = NormalizeHex(response.Profile?.StatusColorHex, config.CloudProfileStatusColorHex);
         config.CloudProfileAvatarUrl = response.Profile?.AvatarUrl ?? config.CloudProfileAvatarUrl;
         config.CloudProfileTag = response.Profile?.Tag ?? config.CloudProfileTag;
-        if (response.Profile?.Venues != null)
+        if (response.Profile?.Venues is { Count: > 0 })
             config.CloudSavedVenues = response.Profile.Venues;
         config.CloudAccountProvider = string.IsNullOrWhiteSpace(response.Provider) ? fallbackProvider : response.Provider;
         config.CloudTokenExpiresAt = response.ExpiresAt == DateTimeOffset.MinValue ? DateTimeOffset.UtcNow.AddDays(7) : response.ExpiresAt;
@@ -622,7 +622,7 @@ internal sealed class PrivacyCloudService : IDisposable
         config.CloudProfileStatusColorHex = NormalizeHex(response.Profile.StatusColorHex, config.CloudProfileStatusColorHex);
         config.CloudProfileAvatarUrl = response.Profile.AvatarUrl ?? config.CloudProfileAvatarUrl;
         config.CloudProfileTag = response.Profile.Tag ?? config.CloudProfileTag;
-        if (response.Profile.Venues != null)
+        if (response.Profile.Venues is { Count: > 0 })
             config.CloudSavedVenues = response.Profile.Venues;
     }
 
@@ -688,7 +688,7 @@ internal sealed class PrivacyCloudService : IDisposable
     {
         uri = null!;
         if (string.IsNullOrWhiteSpace(config.CloudApiBaseUrl))
-            config.CloudApiBaseUrl = "https://privacy-api.kkevinbhrain.workers.dev";
+            config.CloudApiBaseUrl = "https://privatelist-api.kkevinbhrain.workers.dev";
 
         var value = config.CloudApiBaseUrl.Trim();
         if (!value.EndsWith("/", StringComparison.Ordinal))
@@ -705,8 +705,21 @@ internal sealed class PrivacyCloudService : IDisposable
 
     private List<PrivateVenueBookmark> GetCloudProfileVenues()
     {
-        return config.CloudSavedVenues
-            .Where(v => v.Favorite)
+        var selected = config.CloudSavedVenues
+            .Where(v => v.Favorite && !string.IsNullOrWhiteSpace(v.Name))
+            .ToList();
+
+        if (selected.Count == 0)
+        {
+            selected = config.CloudSavedVenues
+                .Where(v => !string.IsNullOrWhiteSpace(v.Name))
+                .ToList();
+        }
+
+        foreach (var venue in selected)
+            venue.Favorite = true;
+
+        return selected
             .GroupBy(v => NormalizeVenueAddress(v.BuildAddress()), StringComparer.OrdinalIgnoreCase)
             .Select(g => g.First())
             .Take(24)
