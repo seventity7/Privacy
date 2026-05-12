@@ -186,7 +186,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
             .AllowPinning(true)
             .AllowClickthrough(false)
             .SetSizeConstraints(new Vector2(CompactUiWidth, TopSummaryHeight + 8f), new Vector2(CompactUiWidth, CompactUiHeight))
-            .AddFlags(ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoMove)
+            .AddFlags(ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoBringToFrontOnFocus)
             .Apply();
     }
 
@@ -405,7 +405,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
     {
         var scale = ImGuiHelpers.GlobalScale;
         var contentTopOffset = MathF.Max(0f, ImGui.GetCursorScreenPos().Y - pos.Y);
-        var bodyTopOffset = config.HideTopBar ? 1f * scale : contentTopOffset + (TopSummaryHeight + 1f) * scale;
+        var bodyTopOffset = config.HideTopBar ? 1f * scale : contentTopOffset + (TopSummaryHeight + 6f) * scale;
         var min = pos + new Vector2(1f * scale, bodyTopOffset);
         var max = pos + size - new Vector2(1f, 1f) * scale;
         mainBackgroundMin = min;
@@ -1439,11 +1439,11 @@ internal sealed class PrivacyWindow : Window, IDisposable
             if (ImGui.BeginMenu("Status"))
             {
                 DrawOwnStatusMenuItem(ContactStatus.Online, "Online");
-                DrawOwnStatusMenuItem(ContactStatus.Idle, "Idle");
                 DrawOwnStatusMenuItem(ContactStatus.Busy, "Busy");
                 DrawOwnStatusMenuItem(ContactStatus.Afk, "AFK");
                 DrawOwnStatusMenuItem(ContactStatus.Content, "Content");
                 DrawOwnStatusMenuItem(ContactStatus.Streaming, "Streaming");
+                DrawOwnStatusMenuItem(ContactStatus.RolePlaying, "Role-Playing");
                 ImGui.EndMenu();
             }
 
@@ -1742,6 +1742,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
         return config.Contacts
             .Where(c => config.ShowOfflineContacts || c.Status != ContactStatus.Offline)
             .Where(c => string.IsNullOrWhiteSpace(GetActiveSearchText()) || c.Name.Contains(GetActiveSearchText(), StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(c => c.IsPinned)
+            .ThenByDescending(c => config.FavoritesFirst && c.Favorite)
             .ToList();
     }
 
@@ -3693,7 +3695,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var scale = ImGuiHelpers.GlobalScale;
         var safeWidth = MathF.Max(40f * scale, width);
         var drawList = ImGui.GetWindowDrawList();
-        var hasStatusMessage = !string.IsNullOrWhiteSpace(contact.CloudStatusMessage);
+        var isOffline = contact.Status == ContactStatus.Offline;
+        var hasStatusMessage = !isOffline && !string.IsNullOrWhiteSpace(contact.CloudStatusMessage);
         var currentY = pos.Y + 22f * scale;
 
         if (hasStatusMessage)
@@ -3808,7 +3811,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         DrawStatusNotificationToggle(contact, notifyPos, notifySize);
 
         var actionIconStartX = contact.CloudAccountLinked ? cloudIconPos.X : targetPos.X;
-        var starMaxX = actionIconStartX - 15f * scale;
+        var starMaxX = actionIconStartX - 30f * scale;
         var starX = MathF.Min(cursorX + 1.5f * scale, starMaxX);
         var starPos = new Vector2(starX, centerY - 4.8f * scale);
         using (ImRaii.PushFont(UiBuilder.IconFont))
@@ -3826,12 +3829,29 @@ internal sealed class PrivacyWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip(contact.Favorite ? "Remove favorite" : "Add favorite");
 
-        var venueName = ResolveVenueNameForContact(contact);
+        var pinPos = starPos + new Vector2(15f * scale, -0.4f * scale);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var pinIcon = contact.IsPinned ? char.ConvertFromUtf32(0xE68F) : char.ConvertFromUtf32(0xF08D);
+            var pinColor = contact.IsPinned ? UiColors.HexToRgba("#FF6868") : Alpha(UiColors.TextDim, 0.38f);
+            drawList.AddText(UiBuilder.IconFont, 8.7f * scale, pinPos, Color(pinColor), pinIcon);
+        }
+
+        ImGui.SetCursorScreenPos(pinPos - new Vector2(2f * scale));
+        if (ImGui.InvisibleButton("pin-contact-inline", new Vector2(13f * scale, 13f * scale)))
+        {
+            contact.IsPinned = !contact.IsPinned;
+            config.Save();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(contact.IsPinned ? "Unpin contact" : "Pin contact");
+
+        var venueName = contact.Status == ContactStatus.Offline ? string.Empty : ResolveVenueNameForContact(contact);
         if (!string.IsNullOrWhiteSpace(venueName))
         {
             var venueText = $"@At {venueName}";
             var venueFontSize = 12.6f * scale;
-            var venuePos = new Vector2(starPos.X + 16f * scale, pos.Y + 2.8f * scale);
+            var venuePos = new Vector2(pinPos.X + 16f * scale, pos.Y + 2.8f * scale);
             var venueMaxX = MathF.Max(venuePos.X, actionIconStartX - 4f * scale);
             drawList.PushClipRect(venuePos - new Vector2(0f, 1f * scale), new Vector2(venueMaxX, venuePos.Y + 17f * scale), true);
             DrawTextWithShadow(drawList, venuePos, Color(Alpha(config.AccentColor, 0.82f)), venueText, venueFontSize);
@@ -4074,23 +4094,25 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var buttonWidth = MathF.Max(26f * scale, (fullWidth - spacing * 5f) / 6f);
         var x = pos.X;
 
-        DrawActionButton(FontAwesomeIcon.Comment, "Tell", UiColors.PurpleHover, new Vector2(buttonWidth, buttonHeight), () => SendTell(contact), x, pos.Y);
+        var dimOffline = contact.Status == ContactStatus.Offline;
+
+        DrawActionButton(FontAwesomeIcon.Comment, "Tell", UiColors.PurpleHover, new Vector2(buttonWidth, buttonHeight), () => SendTell(contact), x, pos.Y, false, dimOffline);
         x += buttonWidth + spacing;
-        DrawActionButton(FontAwesomeIcon.Users, "Party", UiColors.CyanHover, new Vector2(buttonWidth, buttonHeight), () => InviteParty(contact), x, pos.Y);
+        DrawActionButton(FontAwesomeIcon.Users, "Party", UiColors.CyanHover, new Vector2(buttonWidth, buttonHeight), () => InviteParty(contact), x, pos.Y, false, dimOffline);
         x += buttonWidth + spacing;
-        DrawActionButton(char.ConvertFromUtf32(0xE554), "Teleport to user", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => TravelTo(contact), x, pos.Y);
+        DrawActionButton(char.ConvertFromUtf32(0xE554), "Teleport to user", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => TravelTo(contact), x, pos.Y, false, dimOffline);
         x += buttonWidth + spacing;
-        DrawActionButton(FontAwesomeIcon.Home, "Estate Teleportation", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => estateTeleportWindow.Open(contact), x, pos.Y);
+        DrawActionButton(FontAwesomeIcon.Home, "Estate Teleportation", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => estateTeleportWindow.Open(contact), x, pos.Y, false, dimOffline);
         x += buttonWidth + spacing;
-        DrawActionButton(FontAwesomeIcon.Tag, "Tag", config.AccentColor, new Vector2(buttonWidth, buttonHeight), () => OpenTagEditor(contact), x, pos.Y);
+        DrawActionButton(FontAwesomeIcon.Tag, "Tag", config.AccentColor, new Vector2(buttonWidth, buttonHeight), () => OpenTagEditor(contact), x, pos.Y, false, dimOffline);
         x += buttonWidth + spacing;
-        DrawActionButton(FontAwesomeIcon.Book, "Notes", UiColors.BrownHover, new Vector2(buttonWidth, buttonHeight), () => notesWindow.Open(contact), x, pos.Y);
+        DrawActionButton(FontAwesomeIcon.Book, "Notes", UiColors.BrownHover, new Vector2(buttonWidth, buttonHeight), () => notesWindow.Open(contact), x, pos.Y, false, dimOffline);
     }
 
-    private void DrawActionButton(FontAwesomeIcon icon, string tooltip, Vector4 hoverColor, Vector2 size, Action click, float x, float y, bool inputDisabled = false)
-        => DrawActionButton(icon.ToIconString(), tooltip, hoverColor, size, click, x, y, inputDisabled);
+    private void DrawActionButton(FontAwesomeIcon icon, string tooltip, Vector4 hoverColor, Vector2 size, Action click, float x, float y, bool inputDisabled = false, bool dimmed = false)
+        => DrawActionButton(icon.ToIconString(), tooltip, hoverColor, size, click, x, y, inputDisabled, dimmed);
 
-    private void DrawActionButton(string iconText, string tooltip, Vector4 hoverColor, Vector2 size, Action click, float x, float y, bool inputDisabled = false)
+    private void DrawActionButton(string iconText, string tooltip, Vector4 hoverColor, Vector2 size, Action click, float x, float y, bool inputDisabled = false, bool dimmed = false)
     {
         ImGui.SetCursorScreenPos(new Vector2(x, y));
         var drawList = ImGui.GetWindowDrawList();
@@ -4118,7 +4140,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
             var iconFontSize = 14.9f * scale;
             var iconSize = ImGui.CalcTextSize(iconText) * (iconFontSize / MathF.Max(1f, ImGui.GetFontSize()));
             var iconPos = min + (size - iconSize) * 0.5f;
-            drawList.AddText(UiBuilder.IconFont, iconFontSize, iconPos, Color(hovered || active ? hoverColor : UiColors.Text), iconText);
+            var baseColor = dimmed ? Alpha(UiColors.TextDim, 0.42f) : UiColors.Text;
+            drawList.AddText(UiBuilder.IconFont, iconFontSize, iconPos, Color(hovered || active ? hoverColor : baseColor), iconText);
         }
 
         if (clicked)
@@ -4192,54 +4215,29 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var drawList = ImGui.GetWindowDrawList();
         var scale = ImGuiHelpers.GlobalScale;
 
-        var statusIcon = GetStatusIcon(status);
-        if (!string.IsNullOrEmpty(statusIcon))
-        {
-            using (ImRaii.PushFont(UiBuilder.IconFont))
-            {
-                var fontSize = MathF.Max(9.2f * scale, radius * (largeMoon ? 2.35f : 2.16f));
-                var iconSize = ImGui.CalcTextSize(statusIcon) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
-                var iconPos = center - iconSize * 0.5f + new Vector2(0f, -0.2f * scale);
-                drawList.AddText(UiBuilder.IconFont, fontSize, iconPos, Color(GetStatusColor(status)), statusIcon);
-            }
+        var iconSize = radius * (largeMoon ? 3.0f : 2.8f);
+        if (ProfileStatusVisuals.TryDrawGameIcon(drawList, gameIcons, status, center, iconSize, scale))
             return;
-        }
 
         drawList.AddCircleFilled(center, radius + 1.9f * scale, Color(new Vector4(0.010f, 0.018f, 0.015f, 0.96f)), 18);
         drawList.AddCircleFilled(center, radius, Color(GetStatusColor(status)), 18);
         drawList.AddCircle(center, radius + 0.6f * scale, Color(Alpha(Vector4.One, 0.20f)), 18, 1f * scale);
     }
 
-    private static string GetStatusIcon(ContactStatus status)
-        => status switch
-        {
-            ContactStatus.Idle => char.ConvertFromUtf32(0xF186),
-            ContactStatus.Afk => char.ConvertFromUtf32(0xF2F2),
-            ContactStatus.Content => char.ConvertFromUtf32(0xF11B),
-            ContactStatus.Streaming => char.ConvertFromUtf32(0xF590),
-            _ => string.Empty,
-        };
-
     private static Vector4 GetStatusColor(ContactStatus status)
         => status switch
         {
-            ContactStatus.Busy => UiColors.Busy,
-            ContactStatus.Idle => new Vector4(1.00f, 0.80f, 0.23f, 1f),
-            ContactStatus.Afk => new Vector4(1.00f, 0.34f, 0.34f, 1f),
-            ContactStatus.Content => new Vector4(0.18f, 0.88f, 1.00f, 1f),
-            ContactStatus.Streaming => new Vector4(0.78f, 0.56f, 1.00f, 1f),
-            ContactStatus.Online => UiColors.Online,
-            _ => UiColors.Offline,
+            _ => ProfileStatusVisuals.GetColor(status),
         };
 
     private static string GetStatusDisplayName(ContactStatus status)
         => status switch
         {
             ContactStatus.Afk => "AFK",
-            ContactStatus.Idle => "Idle",
             ContactStatus.Busy => "Busy",
             ContactStatus.Content => "Content",
             ContactStatus.Streaming => "Streaming",
+            ContactStatus.RolePlaying => "Role-Playing",
             ContactStatus.Online => "Online",
             _ => "Offline",
         };
@@ -4262,8 +4260,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
         drawList.PushClipRect(windowClipMin, windowClipMax, false);
         var borderPad = 1f * scale;
-        var barFill = Alpha(config.WindowBackgroundColor, MathF.Max(0.92f, config.WindowBackgroundColor.W));
-        var barOverlay = config.TopBarBackgroundColor;
+        var barFill = Alpha(config.WindowBackgroundColor, 1f);
+        var barOverlay = Alpha(config.TopBarBackgroundColor, 1f);
 
         drawList.AddRectFilled(pos - new Vector2(borderPad, borderPad), pos + size + new Vector2(borderPad, borderPad), Color(barFill), rounding + borderPad);
         drawList.AddRectFilled(pos, pos + size, Color(barOverlay), rounding);
@@ -4393,7 +4391,6 @@ internal sealed class PrivacyWindow : Window, IDisposable
             return;
 
         var scale = ImGuiHelpers.GlobalScale;
-        var drawList = ImGui.GetForegroundDrawList();
         var pos = topSummaryPanelPos;
         var size = topSummaryPanelSize;
         var height = size.Y;
@@ -4404,11 +4401,23 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var collapsePos = new Vector2(closePos.X - closeSize.X - 5f * scale, closePos.Y);
         var textClipRight = collapsePos.X - 6f * scale;
         var borderPad = 1f * scale;
+        var savedCursor = ImGui.GetCursorScreenPos();
 
+        ImGui.SetCursorScreenPos(pos - new Vector2(borderPad, borderPad));
+        var overlaySize = size + new Vector2(borderPad * 2f, borderPad * 2f);
+        var overlayFlags = ImGuiWindowFlags.NoBackground | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoNav | ImGuiWindowFlags.NoInputs;
+        if (!ImGui.BeginChild("top-summary-visual-overlay", overlaySize, false, overlayFlags))
+        {
+            ImGui.EndChild();
+            ImGui.SetCursorScreenPos(savedCursor);
+            return;
+        }
+
+        var drawList = ImGui.GetWindowDrawList();
         drawList.PushClipRect(windowClipMin, windowClipMax, false);
 
-        var barFill = Alpha(config.WindowBackgroundColor, MathF.Max(0.92f, config.WindowBackgroundColor.W));
-        var barOverlay = config.TopBarBackgroundColor;
+        var barFill = Alpha(config.WindowBackgroundColor, 1f);
+        var barOverlay = Alpha(config.TopBarBackgroundColor, 1f);
 
         drawList.AddRectFilled(pos - new Vector2(borderPad, borderPad), pos + size + new Vector2(borderPad, borderPad), Color(barFill), rounding + borderPad);
         drawList.AddRectFilled(pos, pos + size, Color(barOverlay), rounding);
@@ -4481,6 +4490,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
         }
 
         drawList.PopClipRect();
+        ImGui.EndChild();
+        ImGui.SetCursorScreenPos(savedCursor);
     }
 
     private void DrawBottomNavigationBar(float availableWidth, float height)
@@ -5070,6 +5081,13 @@ internal sealed class PrivacyWindow : Window, IDisposable
         if (ImGui.MenuItem("Quick note"))
         {
             OpenQuickNoteEditor(contact);
+            ImGui.CloseCurrentPopup();
+        }
+
+        if (ImGui.MenuItem(contact.IsPinned ? "Unpin contact" : "Pin contact"))
+        {
+            contact.IsPinned = !contact.IsPinned;
+            config.Save();
             ImGui.CloseCurrentPopup();
         }
 
@@ -5736,7 +5754,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
     }
 
     private string FormatContactLocation(PrivateContact contact)
-        => BuildLocationLine(contact);
+        => contact.Status == ContactStatus.Offline ? "Currently offline or out of reach.." : BuildLocationLine(contact);
 
     private static string BuildLocationLine(PrivateContact contact)
     {

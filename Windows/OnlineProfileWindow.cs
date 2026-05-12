@@ -20,6 +20,7 @@ internal sealed class OnlineProfileWindow : Window
 {
     private readonly Configuration config;
     private readonly ProfileImageCache profileImages;
+    private readonly GameIconCache gameIcons;
     private readonly FfxivVenuesService ffxivVenuesService;
     private PrivateContact? contact;
     private int venueCarouselOffset;
@@ -28,14 +29,16 @@ internal sealed class OnlineProfileWindow : Window
     private string activeAvatarUrl = string.Empty;
     private string activeAvatarVersion = string.Empty;
     private bool avatarDownloadInProgress;
+    private readonly HashSet<string> pendingBannerDownloads = new(StringComparer.OrdinalIgnoreCase);
     private int pushedColorCount;
     private int pushedStyleVarCount;
 
-    public OnlineProfileWindow(Configuration config, ProfileImageCache profileImages, FfxivVenuesService ffxivVenuesService)
+    public OnlineProfileWindow(Configuration config, ProfileImageCache profileImages, GameIconCache gameIcons, FfxivVenuesService ffxivVenuesService)
         : base("Online Profile###PrivacyOnlineProfile")
     {
         this.config = config;
         this.profileImages = profileImages;
+        this.gameIcons = gameIcons;
         this.ffxivVenuesService = ffxivVenuesService;
         Size = new Vector2(460f, 430f);
         SizeCondition = ImGuiCond.FirstUseEver;
@@ -98,7 +101,11 @@ internal sealed class OnlineProfileWindow : Window
 
     public override void Draw()
     {
-        WindowEdgeFade.DrawUnified(config.WindowBackgroundColor, config.AccentColor);
+        var palette = ResolvePalette();
+        WindowEdgeFade.DrawUnified(palette.WindowBackground, palette.Accent);
+        var themePos = ImGui.GetCursorScreenPos();
+        var themeSize = ImGui.GetContentRegionAvail();
+        ProfileVisuals.DrawThemeBackdrop(ImGui.GetWindowDrawList(), themePos, themeSize, contact?.CloudThemeName ?? "Default", palette, ImGuiHelpers.GlobalScale);
 
         using var body = ImRaii.Child("online-profile-body", new Vector2(-1f, -1f), false);
         if (!body) return;
@@ -139,14 +146,33 @@ internal sealed class OnlineProfileWindow : Window
 
         DrawProfileOverlay(drawList, profile, contentWidth, scale);
 
-        DrawLowerContentDecor(drawList, contentWidth, scale);
+        DrawLowerContentDecor(drawList, profile, contentWidth, scale);
         ImGui.Spacing();
-        DrawOnlineFavoriteVenues(profile);
-        DrawSection("Status", string.IsNullOrWhiteSpace(profile.CloudStatusMessage) ? "No status message set." : profile.CloudStatusMessage, ResolveStatusMessageColor(profile));
-        DrawSection("Bio", string.IsNullOrWhiteSpace(profile.CloudBio) ? "No bio set." : profile.CloudBio);
+        if (!IsHiddenByPermission(profile.CloudVenuesVisibility))
+            DrawOnlineFavoriteVenues(profile);
+        else
+            DrawSection("Favorite Venues", "This user is not sharing venues.");
 
-        ImGui.TextColored(config.AccentColor, "Location");
-        ImGui.TextDisabled(string.IsNullOrWhiteSpace(profile.DisplayLocation) ? "Unknown location." : FormatProfileLocation(profile.DisplayLocation));
+        if (!IsHiddenByPermission(profile.CloudStatusVisibility))
+            DrawSection("Status", string.IsNullOrWhiteSpace(profile.CloudStatusMessage) ? "No status message set." : profile.CloudStatusMessage, ResolveStatusMessageColor(profile));
+        else
+            DrawSection("Status", "This user is not sharing status.");
+
+        if (!IsHiddenByPermission(profile.CloudBioVisibility))
+            DrawSection("Bio", string.IsNullOrWhiteSpace(profile.CloudBio) ? "No bio set." : profile.CloudBio);
+        else
+            DrawSection("Bio", "This user is not sharing bio.");
+
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            ImGui.TextColored(ResolvePalette(profile).Accent, ProfileVisuals.GetSectionIcon(profile.CloudThemeName, "Location"));
+        }
+        ImGui.SameLine();
+        ImGui.TextColored(ResolvePalette(profile).Title, "Location");
+        var locationText = profile.Status == ContactStatus.Offline
+            ? "Currently offline or out of reach.."
+            : (string.IsNullOrWhiteSpace(profile.DisplayLocation) ? "Unknown location." : FormatProfileLocation(profile.DisplayLocation));
+        ImGui.TextColored(ResolvePalette(profile).Subtitle, IsHiddenByPermission(profile.CloudLocationVisibility) ? "This user is not sharing location." : locationText);
 
         ImGui.Spacing();
         ImGui.TextDisabled(profile.CloudLastSyncedAt == DateTimeOffset.MinValue
@@ -174,24 +200,30 @@ internal sealed class OnlineProfileWindow : Window
         var rounding = 7f * scale;
 
         var borderPad = 1f * scale;
-        var barFill = UiColors.WithAlpha(config.WindowBackgroundColor, 0.24f);
-        var barOverlay = UiColors.WithAlpha(config.BottomBarBackgroundColor, 0.18f);
+        var palette = ResolvePalette(profile);
+        var themeAccent = palette.Accent;
+        var barFill = UiColors.WithAlpha(palette.Panel, 0.78f);
+        var barOverlay = palette.Overlay;
         drawList.AddRectFilled(pos - new Vector2(borderPad, borderPad), pos + size + new Vector2(borderPad, borderPad), ImGui.GetColorU32(barFill), rounding + borderPad);
         drawList.AddRectFilled(pos, pos + size, ImGui.GetColorU32(barOverlay), rounding);
-        drawList.AddRect(pos, pos + size, ImGui.GetColorU32(UiColors.WithAlpha(config.AccentColor, 0.42f)), rounding, ImDrawFlags.None, 1f * scale);
-        DrawDotOverlay(drawList, pos, size, UiColors.WithAlpha(config.AccentColor, 0.08f), scale);
+        var bannerTexture = ResolveBannerTexture(profile);
+        if (bannerTexture != null)
+            drawList.AddImageRounded(bannerTexture.Handle, pos, pos + size, Vector2.Zero, Vector2.One, ImGui.GetColorU32(UiColors.WithAlpha(Vector4.One, 0.42f)), rounding);
+        drawList.AddRect(pos, pos + size, ImGui.GetColorU32(UiColors.WithAlpha(themeAccent, 0.42f)), rounding, ImDrawFlags.None, 1f * scale);
+        ProfileVisuals.DrawThemeOverlay(drawList, pos, size, profile.CloudThemeName, palette, scale);
 
         var avatarSize = new Vector2(88f, 88f) * scale;
         var avatarMin = pos + new Vector2(14f, 19f) * scale;
         var avatarMax = avatarMin + avatarSize;
         var texture = GetCloudProfileTexture(profile);
 
-        drawList.AddRectFilled(avatarMin, avatarMax, ImGui.GetColorU32(UiColors.WithAlpha(config.WindowBackgroundColor, 0.34f)), 7f * scale);
+        drawList.AddRectFilled(avatarMin, avatarMax, ImGui.GetColorU32(UiColors.WithAlpha(palette.PanelAlt, 0.58f)), 7f * scale);
         if (texture != null)
             drawList.AddImageRounded(texture.Handle, avatarMin, avatarMax, Vector2.Zero, Vector2.One, ImGui.GetColorU32(Vector4.One), 7f * scale);
         else
-            DrawTextWithShadow(drawList, avatarMin + new Vector2(35f, 31f) * scale, ImGui.GetColorU32(UiColors.TextDim), "?", 24f * scale);
-        drawList.AddRect(avatarMin, avatarMax, ImGui.GetColorU32(UiColors.WithAlpha(config.AccentColor, 0.58f)), 7f * scale, ImDrawFlags.None, 1f * scale);
+            DrawAvatarPlaceholder(drawList, profile, avatarMin, avatarSize, scale);
+        var avatarBorder = UiColors.HexToRgba(NormalizeHex(profile.CloudAvatarBorderColorHex, "#2BE5B5"));
+        drawList.AddRect(avatarMin, avatarMax, ImGui.GetColorU32(UiColors.WithAlpha(avatarBorder, 0.72f)), 7f * scale, ImDrawFlags.None, 1.4f * scale);
 
         var textMin = new Vector2(avatarMax.X + 16f * scale, avatarMin.Y + 4f * scale);
         var textMax = pos + size - new Vector2(14f, 12f) * scale;
@@ -202,9 +234,9 @@ internal sealed class OnlineProfileWindow : Window
         var statusColor = GetStatusColor(profile.Status);
 
         drawList.PushClipRect(textMin - new Vector2(1f, 1f) * scale, textMax, true);
-        DrawTextWithShadow(drawList, textMin, ImGui.GetColorU32(UiColors.Text), TrimToWidth(displayName, textWidth, 15.2f * scale), 15.2f * scale);
-        DrawTextWithShadow(drawList, textMin + new Vector2(0f, 24f) * scale, ImGui.GetColorU32(UiColors.TextDim), TrimToWidth(identity, textWidth, 13.3f * scale), 13.3f * scale);
-        DrawTextWithShadow(drawList, textMin + new Vector2(0f, 48f) * scale, ImGui.GetColorU32(statusColor), statusText, 13.3f * scale);
+        ProfileNameEffects.DrawEffectText(drawList, textMin, TrimToWidth(displayName, textWidth, 15.2f * scale), profile.CloudDisplayNameEffect, palette.Title, 15.2f * scale, scale);
+        DrawTextWithShadow(drawList, textMin + new Vector2(0f, 24f) * scale, ImGui.GetColorU32(palette.Subtitle), TrimToWidth(identity, textWidth, 13.3f * scale), 13.3f * scale);
+        DrawTextWithShadow(drawList, textMin + new Vector2(0f, 48f) * scale, ImGui.GetColorU32(UiColors.WithAlpha(statusColor, 0.96f)), statusText, 13.3f * scale);
         if (avatarDownloadInProgress && !string.IsNullOrWhiteSpace(profile.CloudAvatarUrl))
             DrawTextWithShadow(drawList, textMin + new Vector2(0f, 72f) * scale, ImGui.GetColorU32(UiColors.TextDim), "Loading profile picture...", 12.6f * scale);
         drawList.PopClipRect();
@@ -212,7 +244,44 @@ internal sealed class OnlineProfileWindow : Window
         ImGui.Dummy(new Vector2(contentWidth, size.Y + 8f * scale));
     }
 
-    private void DrawLowerContentDecor(ImDrawListPtr drawList, float contentWidth, float scale)
+    private static bool IsHiddenByPermission(string visibility)
+        => string.Equals(visibility, "Nobody", StringComparison.OrdinalIgnoreCase);
+
+    private void DrawAvatarPlaceholder(ImDrawListPtr drawList, PrivateContact profile, Vector2 avatarMin, Vector2 avatarSize, float scale)
+    {
+        var style = string.IsNullOrWhiteSpace(profile.CloudAvatarPlaceholderStyle) ? "Question Mark" : profile.CloudAvatarPlaceholderStyle;
+        var text = style switch
+        {
+            "Initials" => BuildInitials(profile.CloudDisplayName.Length > 0 ? profile.CloudDisplayName : profile.DisplayName),
+            "User Icon" => FontAwesomeIcon.User.ToIconString(),
+            "Sparkle" => char.ConvertFromUtf32(0xF005),
+            _ => "?",
+        };
+
+        var color = ImGui.GetColorU32(UiColors.WithAlpha(ProfileVisuals.ResolveAccent(profile.CloudThemeName, config.AccentColor), 0.72f));
+        var fontSize = style == "Initials" ? 20f * scale : 23f * scale;
+        if (style is "User Icon" or "Sparkle")
+        {
+            using (ImRaii.PushFont(UiBuilder.IconFont))
+            {
+                var textSize = ImGui.CalcTextSize(text) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+                drawList.AddText(UiBuilder.IconFont, fontSize, avatarMin + (avatarSize - textSize) * 0.5f, color, text);
+            }
+            return;
+        }
+
+        DrawTextWithShadow(drawList, avatarMin + (avatarSize - ImGui.CalcTextSize(text)) * 0.5f, color, text, fontSize);
+    }
+
+    private static string BuildInitials(string name)
+    {
+        var parts = (name ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0) return "?";
+        if (parts.Length == 1) return parts[0].Length > 0 ? parts[0][0].ToString().ToUpperInvariant() : "?";
+        return (parts[0][0].ToString() + parts[^1][0]).ToUpperInvariant();
+    }
+
+    private void DrawLowerContentDecor(ImDrawListPtr drawList, PrivateContact profile, float contentWidth, float scale)
     {
         var cursor = ImGui.GetCursorScreenPos();
         var protrude = 6f * scale;
@@ -222,12 +291,14 @@ internal sealed class OnlineProfileWindow : Window
         var size = new Vector2(contentWidth + protrude * 2f, height);
 
         drawList.PushClipRect(pos, pos + size, true);
-        HeaderDecor.Draw(drawList, pos, size.X, size.Y, config.WindowBackgroundColor, config.AccentColor);
+        ProfileVisuals.DrawThemeOverlay(drawList, pos, size, profile.CloudThemeName, ResolvePalette(profile), scale);
         drawList.PopClipRect();
     }
 
     private void DrawOnlineFavoriteVenues(PrivateContact profile)
     {
+        ffxivVenuesService.EnsureFreshAsync();
+
         var venues = (profile.CloudVenues ?? new List<PrivateVenueBookmark>())
             .Where(v => !string.IsNullOrWhiteSpace(v.Name))
             .ToList();
@@ -235,7 +306,7 @@ internal sealed class OnlineProfileWindow : Window
             return;
 
         var scale = ImGuiHelpers.GlobalScale;
-        ImGui.TextColored(config.AccentColor, "Favorite Venues");
+        ImGui.TextColored(ResolvePalette(profile).Title, "Favorite Venues");
         foreach (var venue in venues)
             EnsureVenueBookmarkMetadata(venue);
 
@@ -247,27 +318,28 @@ internal sealed class OnlineProfileWindow : Window
         visible = Math.Min(visible, venues.Count);
         var stripWidth = visible * imageSize + Math.Max(0, visible - 1) * spacing;
         var totalWidth = arrowWidth * 2f + spacing * 2f + stripWidth;
-        var startX = ImGui.GetCursorScreenPos().X + MathF.Max(0f, (available - totalWidth) * 0.5f);
-        var y = ImGui.GetCursorScreenPos().Y;
+        var origin = ImGui.GetCursorScreenPos();
+        var startX = origin.X + MathF.Max(0f, (available - totalWidth) * 0.5f);
+        var y = origin.Y;
         var drawList = ImGui.GetWindowDrawList();
         venueCarouselOffset = NormalizeCarouselOffset(venueCarouselOffset, venues.Count);
 
         ImGui.SetCursorScreenPos(new Vector2(startX, y + (imageSize - 18f * scale) * 0.5f));
         DrawCarouselArrow("online_venues_left", FontAwesomeIcon.ChevronLeft.ToIconString(), arrowWidth, () => venueCarouselOffset = NormalizeCarouselOffset(venueCarouselOffset - 1, venues.Count));
 
-        ImGui.SameLine(0f, spacing);
-        ImGui.SetCursorScreenPos(new Vector2(startX + arrowWidth + spacing, y));
+        var itemStartX = startX + arrowWidth + spacing;
         for (var i = 0; i < visible; i++)
         {
             var venue = venues[(venueCarouselOffset + i) % venues.Count];
-            var pos = ImGui.GetCursorScreenPos();
+            var pos = new Vector2(itemStartX + i * (imageSize + spacing), y);
+            ImGui.SetCursorScreenPos(pos);
             var texture = ResolveVenueTexture(venue);
-            drawList.AddRectFilled(pos, pos + new Vector2(imageSize), ImGui.GetColorU32(UiColors.WithAlpha(config.WindowBackgroundColor, 0.48f)), 5f * scale);
+            drawList.AddRectFilled(pos, pos + new Vector2(imageSize), ImGui.GetColorU32(UiColors.WithAlpha(ResolvePalette(profile).PanelAlt, 0.66f)), 5f * scale);
             if (texture != null)
                 drawList.AddImageRounded(texture.Handle, pos, pos + new Vector2(imageSize), Vector2.Zero, Vector2.One, ImGui.GetColorU32(Vector4.One), 5f * scale);
             else
                 DrawTextWithShadow(drawList, pos + new Vector2(22f, 20f) * scale, ImGui.GetColorU32(UiColors.TextDim), "?", 18f * scale);
-            drawList.AddRect(pos, pos + new Vector2(imageSize), ImGui.GetColorU32(UiColors.WithAlpha(config.AccentColor, 0.36f)), 5f * scale, ImDrawFlags.None, 1f * scale);
+            drawList.AddRect(pos, pos + new Vector2(imageSize), ImGui.GetColorU32(UiColors.WithAlpha(ResolvePalette(profile).Accent, 0.42f)), 5f * scale, ImDrawFlags.None, 1f * scale);
 
             ImGui.InvisibleButton($"online_favorite_venue_{venue.Name}_{i}", new Vector2(imageSize));
             if (ImGui.IsItemHovered())
@@ -278,16 +350,12 @@ internal sealed class OnlineProfileWindow : Window
                     AddVenueToLocalList(venue);
                 ImGui.EndPopup();
             }
-
-            if (i < visible - 1)
-                ImGui.SameLine(0f, spacing);
         }
 
-        ImGui.SameLine(0f, spacing);
-        ImGui.SetCursorScreenPos(new Vector2(startX + arrowWidth + spacing + stripWidth + spacing, y + (imageSize - 18f * scale) * 0.5f));
+        ImGui.SetCursorScreenPos(new Vector2(itemStartX + stripWidth + spacing, y + (imageSize - 18f * scale) * 0.5f));
         DrawCarouselArrow("online_venues_right", FontAwesomeIcon.ChevronRight.ToIconString(), arrowWidth, () => venueCarouselOffset = NormalizeCarouselOffset(venueCarouselOffset + 1, venues.Count));
 
-        ImGui.SetCursorScreenPos(new Vector2(ImGui.GetCursorScreenPos().X, y + imageSize + 7f * scale));
+        ImGui.SetCursorScreenPos(new Vector2(origin.X, y + imageSize + 7f * scale));
         ImGui.Dummy(new Vector2(1f, 1f));
         ImGui.Spacing();
     }
@@ -351,24 +419,29 @@ internal sealed class OnlineProfileWindow : Window
 
     private void EnsureVenueBookmarkMetadata(PrivateVenueBookmark venue)
     {
-        var catalog = ffxivVenuesService.FindByName(venue.Name);
+        var catalog = ffxivVenuesService.FindBestMatch(venue.Name, venue.BuildAddress())
+            ?? ffxivVenuesService.FindByAddress(venue.DataCenter, venue.World, venue.District, venue.Ward, venue.Plot)
+            ?? ffxivVenuesService.FindByName(venue.Name);
         if (catalog == null)
             return;
 
         var changed = false;
-        if (string.IsNullOrWhiteSpace(venue.ImageUrl) && !string.IsNullOrWhiteSpace(catalog.ImageUrl)) { venue.ImageUrl = catalog.ImageUrl; changed = true; }
-        if (string.IsNullOrWhiteSpace(venue.TeleportCommand) && !string.IsNullOrWhiteSpace(catalog.TeleportCommand)) { venue.TeleportCommand = catalog.TeleportCommand; changed = true; }
-        if (string.IsNullOrWhiteSpace(venue.Address)) { venue.Address = catalog.BuildFullLocation(); changed = true; }
-        if (string.IsNullOrWhiteSpace(venue.DataCenter)) { venue.DataCenter = catalog.DataCenter; changed = true; }
-        if (string.IsNullOrWhiteSpace(venue.World)) { venue.World = catalog.World; changed = true; }
-        if (string.IsNullOrWhiteSpace(venue.District)) { venue.District = catalog.District; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.Name) && !string.IsNullOrWhiteSpace(catalog.Name)) { venue.Name = catalog.Name; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.DataCenter) && !string.IsNullOrWhiteSpace(catalog.DataCenter)) { venue.DataCenter = catalog.DataCenter; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.World) && !string.IsNullOrWhiteSpace(catalog.World)) { venue.World = catalog.World; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.District) && !string.IsNullOrWhiteSpace(catalog.District)) { venue.District = catalog.District; changed = true; }
         if (venue.Ward <= 0 && catalog.Ward > 0) { venue.Ward = catalog.Ward; changed = true; }
         if (venue.Plot <= 0 && catalog.Plot > 0) { venue.Plot = catalog.Plot; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.Address) && !string.IsNullOrWhiteSpace(catalog.BuildFullLocation())) { venue.Address = catalog.BuildFullLocation(); changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.ImageUrl) && !string.IsNullOrWhiteSpace(catalog.ImageUrl)) { venue.ImageUrl = catalog.ImageUrl; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.WebsiteUrl) && !string.IsNullOrWhiteSpace(catalog.WebsiteUrl)) { venue.WebsiteUrl = catalog.WebsiteUrl; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.DiscordUrl) && !string.IsNullOrWhiteSpace(catalog.DiscordUrl)) { venue.DiscordUrl = catalog.DiscordUrl; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.TeleportCommand) && !string.IsNullOrWhiteSpace(catalog.TeleportCommand)) { venue.TeleportCommand = catalog.TeleportCommand; changed = true; }
+        if (string.IsNullOrWhiteSpace(venue.Source)) { venue.Source = "FFXIVVenues"; changed = true; }
 
         if (changed)
             config.Save();
     }
-
 
     private void DrawFavoriteVenueTooltip(PrivateVenueBookmark venue)
     {
@@ -468,23 +541,17 @@ internal sealed class OnlineProfileWindow : Window
     private static Vector4 GetStatusColor(ContactStatus status)
         => status switch
         {
-            ContactStatus.Busy => UiColors.Busy,
-            ContactStatus.Idle => new Vector4(1.00f, 0.80f, 0.23f, 1f),
-            ContactStatus.Afk => new Vector4(1.00f, 0.34f, 0.34f, 1f),
-            ContactStatus.Content => new Vector4(0.18f, 0.88f, 1.00f, 1f),
-            ContactStatus.Streaming => new Vector4(0.78f, 0.56f, 1.00f, 1f),
-            ContactStatus.Online => UiColors.Online,
-            _ => UiColors.Offline,
+            _ => ProfileStatusVisuals.GetColor(status),
         };
 
     private static string GetStatusDisplayName(ContactStatus status)
         => status switch
         {
             ContactStatus.Afk => "AFK",
-            ContactStatus.Idle => "Idle",
             ContactStatus.Busy => "Busy",
             ContactStatus.Content => "Content",
             ContactStatus.Streaming => "Streaming",
+            ContactStatus.RolePlaying => "Role-Playing",
             ContactStatus.Online => "Online",
             _ => "Offline",
         };
@@ -527,12 +594,63 @@ internal sealed class OnlineProfileWindow : Window
 
     private void DrawSection(string title, string text, Vector4? textColor = null)
     {
-        ImGui.TextColored(config.AccentColor, title);
+        var palette = ResolvePalette();
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            ImGui.TextColored(palette.Accent, ProfileVisuals.GetSectionIcon(contact?.CloudThemeName, title));
+        }
+        ImGui.SameLine();
+        ImGui.TextColored(palette.Title, title);
         if (textColor.HasValue)
             ImGui.TextColored(textColor.Value, text);
         else
-            ImGui.TextWrapped(text);
+            ImGui.TextColored(palette.Body, text);
         ImGui.Spacing();
+    }
+
+    private ProfileVisuals.ThemePalette ResolvePalette(PrivateContact? profile = null)
+    {
+        var selected = profile ?? contact;
+        return ProfileVisuals.ResolvePalette(selected?.CloudThemeName ?? "Default", UiColors.HexToRgba(NormalizeHex(selected?.CloudThemeColorHex, "#2BE5B5")), config.WindowBackgroundColor);
+    }
+
+    private static void DrawThemeOverlay(ImDrawListPtr drawList, Vector2 pos, Vector2 size, string themeName, ProfileVisuals.ThemePalette palette, float scale)
+    {
+        drawList.AddRectFilled(pos, pos + size, ImGui.GetColorU32(UiColors.WithAlpha(palette.Panel, 0.26f)), 0f);
+        var key = (themeName ?? string.Empty).Trim();
+        if (string.Equals(key, "Minimal", StringComparison.OrdinalIgnoreCase))
+        {
+            for (var i = 0; i < 4; i++)
+            {
+                var y = pos.Y + (i + 1) * size.Y / 5f;
+                drawList.AddLine(new Vector2(pos.X, y), new Vector2(pos.X + size.X, y), ImGui.GetColorU32(UiColors.WithAlpha(palette.Accent, 0.035f)), 1f * scale);
+            }
+            return;
+        }
+
+        if (string.Equals(key, "Glass", StringComparison.OrdinalIgnoreCase))
+        {
+            drawList.AddRectFilledMultiColor(pos, pos + size, ImGui.GetColorU32(UiColors.WithAlpha(Vector4.One, 0.075f)), ImGui.GetColorU32(UiColors.WithAlpha(Vector4.One, 0.025f)), ImGui.GetColorU32(Vector4.Zero), ImGui.GetColorU32(Vector4.Zero));
+            DrawDotOverlay(drawList, pos, size, UiColors.WithAlpha(palette.Accent, 0.045f), scale);
+            return;
+        }
+
+        if (string.Equals(key, "Pastel", StringComparison.OrdinalIgnoreCase))
+        {
+            drawList.AddCircleFilled(pos + new Vector2(size.X * 0.78f, size.Y * 0.16f), 58f * scale, ImGui.GetColorU32(palette.Glow), 64);
+            drawList.AddCircleFilled(pos + new Vector2(size.X * 0.23f, size.Y * 0.72f), 38f * scale, ImGui.GetColorU32(UiColors.WithAlpha(palette.Accent, 0.10f)), 48);
+            return;
+        }
+
+        if (string.Equals(key, "Royal", StringComparison.OrdinalIgnoreCase))
+        {
+            drawList.AddCircleFilled(pos + new Vector2(size.X * 0.82f, size.Y * 0.20f), 62f * scale, ImGui.GetColorU32(palette.Glow), 64);
+            DrawDotOverlay(drawList, pos, size, UiColors.WithAlpha(palette.Accent, 0.05f), scale);
+            return;
+        }
+
+        drawList.AddCircleFilled(pos + new Vector2(size.X * 0.84f, size.Y * 0.18f), 52f * scale, ImGui.GetColorU32(palette.Glow), 58);
+        DrawDotOverlay(drawList, pos, size, UiColors.WithAlpha(palette.Accent, 0.065f), scale);
     }
 
     private Vector4 ResolveStatusMessageColor(PrivateContact profile)
@@ -548,6 +666,61 @@ internal sealed class OnlineProfileWindow : Window
             return fallback;
 
         return "#" + text.ToUpperInvariant();
+    }
+
+    private Dalamud.Interface.Textures.TextureWraps.IDalamudTextureWrap? ResolveBannerTexture(PrivateContact profile)
+    {
+        if (!string.IsNullOrWhiteSpace(profile.CloudBannerLocalPath))
+        {
+            var texture = profileImages.GetTexture(profile.CloudBannerLocalPath);
+            if (texture != null)
+                return texture;
+        }
+
+        if (string.IsNullOrWhiteSpace(profile.CloudBannerUrl))
+            return null;
+
+        var bannerUrl = profile.CloudBannerUrl.Trim();
+        var cacheKey = BuildBannerCacheKey(profile.Id + "_banner", bannerUrl);
+        if (profileImages.TryGetCurrentRemoteVenueImagePath(bannerUrl, cacheKey, bannerUrl, out var cachedPath))
+        {
+            profile.CloudBannerLocalPath = cachedPath;
+            var texture = profileImages.GetTexture(cachedPath);
+            if (texture != null)
+                return texture;
+        }
+
+        if (!pendingBannerDownloads.Add(cacheKey))
+            return null;
+        Task.Run(async () =>
+        {
+            try
+            {
+                var storedPath = await profileImages.DownloadRemoteVenueImageAsync(bannerUrl, cacheKey, CancellationToken.None, bannerUrl).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(storedPath))
+                {
+                    profile.CloudBannerLocalPath = storedPath;
+                    config.Save();
+                }
+            }
+            finally
+            {
+                pendingBannerDownloads.Remove(cacheKey);
+            }
+        });
+
+        return null;
+    }
+
+    private static string BuildBannerCacheKey(string ownerKey, string bannerUrl)
+    {
+        unchecked
+        {
+            var hash = 23;
+            foreach (var ch in bannerUrl.Trim().ToLowerInvariant())
+                hash = hash * 31 + ch;
+            return $"{ownerKey}_{Math.Abs(hash)}";
+        }
     }
 
     private Dalamud.Interface.Textures.TextureWraps.IDalamudTextureWrap? GetCloudProfileTexture(PrivateContact profile)

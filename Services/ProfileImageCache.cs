@@ -27,6 +27,7 @@ internal sealed class ProfileImageCache : IDisposable
     private static readonly HttpClient remoteHttpClient = new();
     private readonly Dictionary<string, IDalamudTextureWrap> cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> failedTexturePaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, Task<IDalamudTextureWrap?>> textureLoadTasks = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, DateTime> failedRemoteVenueImages = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> remoteVenueDownloadLocks = new(StringComparer.OrdinalIgnoreCase);
 
@@ -302,17 +303,40 @@ internal sealed class ProfileImageCache : IDisposable
         if (cache.TryGetValue(path, out var existing)) return existing;
         if (failedTexturePaths.Contains(path)) return null;
 
+        if (textureLoadTasks.TryGetValue(path, out var activeLoad))
+        {
+            if (!activeLoad.IsCompleted)
+                return null;
+
+            textureLoadTasks.TryRemove(path, out _);
+            if (activeLoad.Status == TaskStatus.RanToCompletion && activeLoad.Result != null)
+            {
+                cache[path] = activeLoad.Result;
+                return activeLoad.Result;
+            }
+
+            failedTexturePaths.Add(path);
+            if (fileName.StartsWith("venue_", StringComparison.OrdinalIgnoreCase))
+                TryDeleteFile(path);
+            return null;
+        }
+
+        textureLoadTasks[path] = LoadTextureAsync(path);
+        return null;
+    }
+
+    private async Task<IDalamudTextureWrap?> LoadTextureAsync(string path)
+    {
         try
         {
-            var bytes = File.ReadAllBytes(path);
-            var texture = textureProvider.CreateFromImageAsync(bytes).Result;
-            cache[path] = texture;
-            return texture;
+            var bytes = await File.ReadAllBytesAsync(path).ConfigureAwait(false);
+            return await textureProvider.CreateFromImageAsync(bytes).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
+            var fileName = Path.GetFileName(path);
             failedTexturePaths.Add(path);
-            if (Path.GetFileName(path).StartsWith("venue_", StringComparison.OrdinalIgnoreCase))
+            if (fileName.StartsWith("venue_", StringComparison.OrdinalIgnoreCase))
             {
                 TryDeleteFile(path);
                 return null;
@@ -326,10 +350,34 @@ internal sealed class ProfileImageCache : IDisposable
     public void Invalidate(string path)
     {
         failedTexturePaths.Remove(path);
+        textureLoadTasks.TryRemove(path, out _);
         if (!cache.Remove(path, out var texture)) return;
         texture.Dispose();
     }
 
+
+    public bool TryGetCurrentRemoteVenueImagePath(string imageUrl, string cacheKey, string cacheVersion, out string path)
+    {
+        path = string.Empty;
+        if (string.IsNullOrWhiteSpace(imageUrl) || string.IsNullOrWhiteSpace(cacheKey))
+            return false;
+
+        try
+        {
+            var safeKey = SanitizeFileName("venue_" + cacheKey);
+            var markerPath = GetRemoteMarkerPath(safeKey);
+            if (!File.Exists(markerPath) || !string.Equals(File.ReadAllText(markerPath), BuildRemoteMarker(imageUrl, cacheVersion), StringComparison.Ordinal))
+                return false;
+
+            path = Directory.GetFiles(ProfileImageDirectory, $"{safeKey}.cloud.*").FirstOrDefault() ?? string.Empty;
+            return !string.IsNullOrWhiteSpace(path) && File.Exists(path);
+        }
+        catch
+        {
+            path = string.Empty;
+            return false;
+        }
+    }
 
     public bool IsRemoteImageCurrent(string cacheKey, string imageUrl, string cacheVersion = "")
     {
