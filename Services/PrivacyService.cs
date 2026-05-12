@@ -31,6 +31,9 @@ internal sealed class PrivacyService
         this.log = log;
     }
 
+    public string ResolveWorldNameForContext(uint worldId)
+        => ResolveWorldName(worldId);
+
     public bool AddFromContextTarget(MenuTargetDefault target, out PrivateContact? contact, out string message)
     {
         contact = null;
@@ -184,6 +187,7 @@ internal sealed class PrivacyService
 
                 var contact = FindContact(name, world);
                 if (contact == null) continue;
+                if (HasFreshCloudPresence(contact)) continue;
 
                 var previousStatus = contact.Status;
                 var previousLocation = contact.DisplayLocation;
@@ -301,6 +305,28 @@ internal sealed class PrivacyService
         return !string.IsNullOrWhiteSpace(localWorld) &&
                !string.IsNullOrWhiteSpace(contact.CurrentWorld) &&
                string.Equals(localWorld, contact.CurrentWorld, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public PrivateContact? GetCurrentTargetContact()
+    {
+        try
+        {
+            if (targetManager.Target is not IPlayerCharacter player)
+                return null;
+
+            var name = CleanName(player.Name.ToString());
+            var worldId = GetPlayerHomeWorldId(player);
+            var world = ResolveWorldName(worldId);
+            if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(world))
+                return null;
+
+            return FindExistingContact(name, world, 0);
+        }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "Privacy: failed to resolve current target contact.");
+            return null;
+        }
     }
 
     public PrivateContact? FindExistingContact(string name, string world, ulong contentId)

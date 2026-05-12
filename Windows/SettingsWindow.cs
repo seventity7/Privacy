@@ -14,6 +14,8 @@ using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Numerics;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
 using System.Security.Cryptography;
 
 namespace Privacy.Windows;
@@ -42,6 +44,9 @@ internal sealed class SettingsWindow : Window
     private Vector2 bundledBackgroundRightArrowMin;
     private Vector2 bundledBackgroundRightArrowMax;
     private bool confirmClear;
+    private string recordingShortcutId = string.Empty;
+    private string pendingShortcutValue = string.Empty;
+    private bool recordingSawKeys;
     private int pushedColorCount;
     private int pushedStyleVarCount;
 
@@ -131,6 +136,16 @@ var drawList = ImGui.GetWindowDrawList();
         changed |= ImGui.Checkbox("Hide top counter bar", ref config.HideTopBar);
 
         ImGui.Separator();
+        ImGui.TextColored(config.AccentColor, "Activity and shortcuts");
+        changed |= ImGui.Checkbox("Auto status by activity", ref config.AutoStatusByActivity);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Automatically switches your cloud presence to Content/AFK/Online using local game state when possible.");
+        changed |= ImGui.Checkbox("Hide precise location while in duty", ref config.AutoStatusHideLocationInDuty);
+        changed |= DrawShortcutField("Open main window", ref config.OpenMainWindowShortcut);
+        changed |= DrawShortcutField("Open target online profile", ref config.OpenTargetProfileShortcut);
+        changed |= DrawShortcutField("Open target notes", ref config.OpenTargetNotesShortcut);
+
+        ImGui.Separator();
         ImGui.TextColored(config.AccentColor, "Notifications");
         changed |= ImGui.Checkbox("Show online count on login", ref config.NotifyOnlineCountOnLogin);
         changed |= ImGui.Checkbox("Notify favorite contacts automatically", ref config.NotifyFavoriteContacts);
@@ -170,6 +185,127 @@ var drawList = ImGui.GetWindowDrawList();
         if (changed)
             config.Save();
     }
+
+    private bool DrawShortcutField(string label, ref string value)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var id = $"shortcut_{label}";
+        var isRecording = string.Equals(recordingShortcutId, id, StringComparison.Ordinal);
+        var changed = false;
+
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted(label);
+        ImGui.SameLine(190f * scale);
+
+        var buttonText = isRecording
+            ? (string.IsNullOrWhiteSpace(pendingShortcutValue) ? "Press keys..." : pendingShortcutValue)
+            : (string.IsNullOrWhiteSpace(value) ? "Unbound" : value);
+
+        if (ImGui.Button($"{buttonText}##{id}", new Vector2(180f, 0f) * scale))
+        {
+            recordingShortcutId = id;
+            pendingShortcutValue = string.Empty;
+            recordingSawKeys = false;
+        }
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Click, press the key combo, then release the keys to save it. Right-click to clear.");
+
+        if (ImGui.BeginPopupContextItem($"{id}_context"))
+        {
+            if (ImGui.MenuItem("Clear keybind"))
+            {
+                value = string.Empty;
+                changed = true;
+                if (isRecording) recordingShortcutId = string.Empty;
+            }
+            ImGui.EndPopup();
+        }
+
+        if (isRecording)
+            changed |= UpdateShortcutRecording(ref value);
+
+        return changed;
+    }
+
+    private bool UpdateShortcutRecording(ref string value)
+    {
+        if (IsKeyDown(0x1B))
+        {
+            recordingShortcutId = string.Empty;
+            pendingShortcutValue = string.Empty;
+            recordingSawKeys = false;
+            return false;
+        }
+
+        var pressed = ReadPressedShortcut();
+        if (!string.IsNullOrWhiteSpace(pressed))
+        {
+            pendingShortcutValue = pressed;
+            recordingSawKeys = true;
+            return false;
+        }
+
+        if (!recordingSawKeys)
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(pendingShortcutValue))
+        {
+            value = pendingShortcutValue;
+            recordingShortcutId = string.Empty;
+            pendingShortcutValue = string.Empty;
+            recordingSawKeys = false;
+            return true;
+        }
+
+        recordingShortcutId = string.Empty;
+        recordingSawKeys = false;
+        return false;
+    }
+
+    private static string ReadPressedShortcut()
+    {
+        var parts = new List<string>();
+        if (IsKeyDown(0x11)) parts.Add("Ctrl");
+        if (IsKeyDown(0x10)) parts.Add("Shift");
+        if (IsKeyDown(0x12)) parts.Add("Alt");
+
+        var mainKey = FindMainKey();
+        if (!string.IsNullOrWhiteSpace(mainKey))
+            parts.Add(mainKey);
+
+        return parts.Count == 0 || (parts.Count <= 3 && string.IsNullOrWhiteSpace(mainKey))
+            ? string.Empty
+            : string.Join("+", parts);
+    }
+
+    private static string FindMainKey()
+    {
+        for (var key = 0x41; key <= 0x5A; key++)
+            if (IsKeyDown(key)) return ((char)key).ToString();
+        for (var key = 0x30; key <= 0x39; key++)
+            if (IsKeyDown(key)) return ((char)key).ToString();
+        for (var key = 0x70; key <= 0x87; key++)
+            if (IsKeyDown(key)) return "F" + (key - 0x70 + 1);
+
+        foreach (var (vk, name) in ExtraShortcutKeys)
+            if (IsKeyDown(vk)) return name;
+        return string.Empty;
+    }
+
+    private static readonly (int Vk, string Name)[] ExtraShortcutKeys =
+    [
+        (0x20, "Space"), (0x09, "Tab"), (0x0D, "Enter"),
+        (0x2D, "Insert"), (0x2E, "Delete"), (0x24, "Home"), (0x23, "End"),
+        (0x21, "PageUp"), (0x22, "PageDown"), (0x25, "Left"), (0x26, "Up"),
+        (0x27, "Right"), (0x28, "Down")
+    ];
+
+    private static bool IsKeyDown(int vk)
+        => (GetAsyncKeyState(vk) & 0x8000) != 0;
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
 
     private void DrawMaintenanceButtons()
     {

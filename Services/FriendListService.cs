@@ -12,7 +12,7 @@ namespace Privacy.Services;
 internal sealed unsafe class FriendListService
 {
     private const uint OfflineIcon = 61504;
-    private const uint BusyIcon = 61559;
+    private const uint BusyIcon = 61509;
     private const uint OnlineIcon = 61505;
 
     private readonly IDataManager dataManager;

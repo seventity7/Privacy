@@ -1,13 +1,16 @@
 using Dalamud.Game.Command;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.Gui.ContextMenu;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
+using Privacy.Models;
 using Privacy.Services;
 using Privacy.Windows;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 
 namespace Privacy;
 
@@ -44,6 +47,7 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime loginNotificationDueAt = DateTime.MinValue;
     private bool pendingLoginNotifications;
     private bool sentLoginOnlineSummary;
+    private readonly Dictionary<string, bool> shortcutWasDown = new(StringComparer.OrdinalIgnoreCase);
 
     public Plugin(
         IDalamudPluginInterface pluginInterface,
@@ -53,6 +57,7 @@ public sealed class Plugin : IDalamudPlugin
         IObjectTable objectTable,
         ITargetManager targetManager,
         IClientState clientState,
+        ICondition condition,
         IChatGui chatGui,
         ITextureProvider textureProvider,
         IContextMenu contextMenu,
@@ -86,10 +91,10 @@ public sealed class Plugin : IDalamudPlugin
         friendListService = new FriendListService(dataManager, pluginLog);
         ffxivVenuesService = new FfxivVenuesService(pluginInterface, pluginLog);
         ffxivVenuesService.EnsureFreshAsync();
-        cloudService = new PrivacyCloudService(config, dataManager, clientState, objectTable, chatGui, pluginLog);
+        cloudService = new PrivacyCloudService(config, dataManager, clientState, objectTable, chatGui, pluginLog, ffxivVenuesService, condition);
         loginWindow = new LoginWindow(config, cloudService);
-        myProfileWindow = new MyProfileWindow(config, cloudService, profileImages, ffxivVenuesService, dataManager, clientState);
-        onlineProfileWindow = new OnlineProfileWindow(config, profileImages, ffxivVenuesService);
+        myProfileWindow = new MyProfileWindow(config, cloudService, profileImages, gameIcons, ffxivVenuesService, dataManager, clientState);
+        onlineProfileWindow = new OnlineProfileWindow(config, profileImages, gameIcons, ffxivVenuesService);
         notesWindow = new NotesWindow(config, pluginLog);
         settingsWindow = new SettingsWindow(config, profileImages, pluginInterface);
         estateTeleportWindow = new EstateTeleportWindow(config, privacyService, nativeCommands, pluginLog);
@@ -105,7 +110,7 @@ public sealed class Plugin : IDalamudPlugin
         windowSystem.AddWindow(estateTeleportWindow);
         windowSystem.AddWindow(contactProfileWindow);
 
-        contextMenuService = new PrivacyContextMenuService(contextMenu, pluginInterface, config, privacyService, chatGui, objectTable, () => privacyWindow.IsOpen = true, pluginLog);
+        contextMenuService = new PrivacyContextMenuService(contextMenu, pluginInterface, config, privacyService, chatGui, objectTable, () => privacyWindow.IsOpen = true, contact => onlineProfileWindow.Open(contact), pluginLog);
 
         AddCommand("/plist");
         AddCommand("/privacy");
@@ -170,6 +175,8 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnFrameworkUpdate(IFramework framework)
     {
+        ProcessShortcuts();
+
         if (DateTime.UtcNow < nextRuntimeRefresh) return;
         nextRuntimeRefresh = DateTime.UtcNow.AddSeconds(1);
 
@@ -178,6 +185,96 @@ public sealed class Plugin : IDalamudPlugin
         cloudService.FrameworkTick(privacyService, profileImages);
         ProcessStatusNotifications();
     }
+
+    private void ProcessShortcuts()
+    {
+        TriggerShortcut(config.OpenMainWindowShortcut, "open-main", () => privacyWindow.IsOpen = !privacyWindow.IsOpen);
+        TriggerShortcut(config.OpenTargetProfileShortcut, "open-target-profile", () =>
+        {
+            var contact = privacyService.GetCurrentTargetContact();
+            if (contact != null && contact.CloudAccountLinked)
+                ToggleOnlineProfile(contact);
+        });
+        TriggerShortcut(config.OpenTargetNotesShortcut, "open-target-notes", () =>
+        {
+            var contact = privacyService.GetCurrentTargetContact();
+            if (contact != null)
+                ToggleNotes(contact);
+        });
+    }
+
+
+    private void ToggleOnlineProfile(PrivateContact contact)
+    {
+        if (onlineProfileWindow.IsOpen)
+            onlineProfileWindow.IsOpen = false;
+        else
+            onlineProfileWindow.Open(contact);
+    }
+
+    private void ToggleNotes(PrivateContact contact)
+    {
+        if (notesWindow.IsOpen)
+            notesWindow.IsOpen = false;
+        else
+            notesWindow.Open(contact);
+    }
+
+    private void TriggerShortcut(string shortcut, string key, Action action)
+    {
+        var down = IsShortcutDown(shortcut);
+        shortcutWasDown.TryGetValue(key, out var wasDown);
+        if (down && !wasDown)
+            action();
+        shortcutWasDown[key] = down;
+    }
+
+    private static bool IsShortcutDown(string shortcut)
+    {
+        if (string.IsNullOrWhiteSpace(shortcut)) return false;
+        var parts = shortcut.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0) return false;
+
+        foreach (var part in parts)
+        {
+            var vk = ParseVirtualKey(part);
+            if (vk == 0 || (GetAsyncKeyState(vk) & 0x8000) == 0)
+                return false;
+        }
+
+        return true;
+    }
+
+    private static int ParseVirtualKey(string key)
+    {
+        key = key.Trim();
+        if (key.Equals("Ctrl", StringComparison.OrdinalIgnoreCase) || key.Equals("Control", StringComparison.OrdinalIgnoreCase)) return 0x11;
+        if (key.Equals("Shift", StringComparison.OrdinalIgnoreCase)) return 0x10;
+        if (key.Equals("Alt", StringComparison.OrdinalIgnoreCase)) return 0x12;
+        if (key.Length == 1 && char.IsLetterOrDigit(key[0])) return char.ToUpperInvariant(key[0]);
+        if (key.StartsWith("F", StringComparison.OrdinalIgnoreCase) && int.TryParse(key[1..], out var fn) && fn is >= 1 and <= 24) return 0x70 + fn - 1;
+        return key.ToUpperInvariant() switch
+        {
+            "SPACE" => 0x20,
+            "TAB" => 0x09,
+            "ENTER" => 0x0D,
+            "ESC" or "ESCAPE" => 0x1B,
+            "INSERT" => 0x2D,
+            "DELETE" => 0x2E,
+            "HOME" => 0x24,
+            "END" => 0x23,
+            "PAGEUP" => 0x21,
+            "PAGEDOWN" => 0x22,
+            "LEFT" => 0x25,
+            "UP" => 0x26,
+            "RIGHT" => 0x27,
+            "DOWN" => 0x28,
+            _ => 0,
+        };
+    }
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
 
     private void ProcessStatusNotifications()
     {
@@ -264,10 +361,10 @@ public sealed class Plugin : IDalamudPlugin
         => status switch
         {
             Models.ContactStatus.Afk => "AFK",
-            Models.ContactStatus.Idle => "Idle",
             Models.ContactStatus.Busy => "Busy",
             Models.ContactStatus.Content => "Content",
             Models.ContactStatus.Streaming => "Streaming",
+            Models.ContactStatus.RolePlaying => "Role-Playing",
             Models.ContactStatus.Online => "Online",
             _ => "Offline",
         };
