@@ -294,7 +294,7 @@ https://raw.githubusercontent.com/seventity7/Privacy/main/repo.json
 - You do not need to create an account to use the local Privacy features
 - Online Profile features require a Privacy's account
 
-## Thanks for Everyone that is helping during the test phase, specialy:
+### Thanks for Everyone that is helping during the test phase, specialy:
 
 - ❄️ Yokisama Yamato
 - 🐾 Damien Panter
