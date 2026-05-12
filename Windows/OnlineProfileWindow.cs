@@ -229,7 +229,7 @@ internal sealed class OnlineProfileWindow : Window
     private void DrawOnlineFavoriteVenues(PrivateContact profile)
     {
         var venues = (profile.CloudVenues ?? new List<PrivateVenueBookmark>())
-            .Where(v => v.Favorite && !string.IsNullOrWhiteSpace(v.Name))
+            .Where(v => !string.IsNullOrWhiteSpace(v.Name))
             .ToList();
         if (venues.Count == 0)
             return;
