@@ -8,7 +8,6 @@ using Privacy.Windows;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 
 namespace Privacy;
 
@@ -71,8 +70,9 @@ public sealed class Plugin : IDalamudPlugin
         config = pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         config.Initialize(pluginInterface);
 
-        if (string.IsNullOrWhiteSpace(config.CloudApiBaseUrl))
-            config.CloudApiBaseUrl = ResolveBundledCloudApiBaseUrl();
+        if (string.IsNullOrWhiteSpace(config.CloudApiBaseUrl) ||
+            string.Equals(config.CloudApiBaseUrl.Trim().TrimEnd('/'), "https://privacy-api.kkevinbhrain.workers.dev", StringComparison.OrdinalIgnoreCase))
+            config.CloudApiBaseUrl = "https://REMOVED_PRIVACY_CLOUD_API_URL";
 
         config.CloudEnabled = true;
         config.CloudAutoSync = true;
@@ -116,15 +116,6 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.UiBuilder.OpenMainUi += OpenMainUi;
         pluginInterface.UiBuilder.OpenConfigUi += OpenConfigUi;
         framework.Update += OnFrameworkUpdate;
-    }
-
-    private static string ResolveBundledCloudApiBaseUrl()
-    {
-        return Assembly.GetExecutingAssembly()
-            .GetCustomAttributes<AssemblyMetadataAttribute>()
-            .FirstOrDefault(attribute => string.Equals(attribute.Key, "PrivacyCloudApiBaseUrl", StringComparison.Ordinal))
-            ?.Value
-            ?.Trim() ?? string.Empty;
     }
 
     public void Dispose()
