@@ -1187,8 +1187,8 @@ internal sealed class PrivacyCloudService : IDisposable
     private bool TryGetApiBaseUri(out Uri uri)
     {
         uri = null!;
-        if (string.IsNullOrWhiteSpace(config.CloudApiBaseUrl))
-            config.CloudApiBaseUrl = "https://REMOVED_PRIVACY_CLOUD_API_URL";
+        if (string.IsNullOrWhiteSpace(config.CloudApiBaseUrl) && !string.IsNullOrWhiteSpace(BuildSettings.CloudApiBaseUrl))
+            config.CloudApiBaseUrl = BuildSettings.CloudApiBaseUrl;
 
         var value = config.CloudApiBaseUrl.Trim();
         if (!value.EndsWith("/", StringComparison.Ordinal))

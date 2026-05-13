@@ -75,9 +75,14 @@ public sealed class Plugin : IDalamudPlugin
         config = pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         config.Initialize(pluginInterface);
 
-        if (string.IsNullOrWhiteSpace(config.CloudApiBaseUrl) ||
-            string.Equals(config.CloudApiBaseUrl.Trim().TrimEnd('/'), "https://privacy-api.kkevinbhrain.workers.dev", StringComparison.OrdinalIgnoreCase))
-            config.CloudApiBaseUrl = "https://REMOVED_PRIVACY_CLOUD_API_URL";
+        var buildCloudApiBaseUrl = BuildSettings.CloudApiBaseUrl;
+        if (string.IsNullOrWhiteSpace(config.CloudApiBaseUrl) && !string.IsNullOrWhiteSpace(buildCloudApiBaseUrl))
+            config.CloudApiBaseUrl = buildCloudApiBaseUrl;
+
+        if (!string.IsNullOrWhiteSpace(config.CloudApiBaseUrl) &&
+            !string.IsNullOrWhiteSpace(buildCloudApiBaseUrl) &&
+            !string.Equals(config.CloudApiBaseUrl.Trim().TrimEnd('/'), buildCloudApiBaseUrl.Trim().TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+            config.CloudApiBaseUrl = buildCloudApiBaseUrl;
 
         config.CloudEnabled = true;
         config.CloudAutoSync = true;

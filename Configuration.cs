@@ -43,7 +43,7 @@ public sealed class Configuration : IPluginConfiguration
     public bool CloudAutoSync = true;
     public bool CloudHeartbeatEnabled = true;
     public bool CloudProfileLookupEnabled = true;
-    public string CloudApiBaseUrl = "https://REMOVED_PRIVACY_CLOUD_API_URL";
+    public string CloudApiBaseUrl = string.Empty;
     public string CloudAccessToken = string.Empty;
     public string CloudRefreshToken = string.Empty;
     public string CloudUserId = string.Empty;
