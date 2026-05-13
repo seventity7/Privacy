@@ -85,7 +85,8 @@ internal sealed class OnlineProfileWindow : Window
         PushColor(ImGuiCol.ScrollbarGrabHovered, UiColors.WithAlpha(config.AccentColor, 0.72f));
         PushColor(ImGuiCol.ScrollbarGrabActive, UiColors.WithAlpha(config.AccentColor, 0.92f));
 
-        PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(8f, 0f) * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(4f, 0f) * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0.6f * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(6f, 4f) * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(6f, 6f) * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.WindowRounding, 7f * ImGuiHelpers.GlobalScale);
@@ -102,7 +103,13 @@ internal sealed class OnlineProfileWindow : Window
     public override void Draw()
     {
         var palette = ResolvePalette();
-        WindowEdgeFade.DrawUnified(palette.WindowBackground, palette.Accent);
+        var headerTop = new Vector4(
+            MathF.Min(1f, palette.WindowBackground.X + 0.028f),
+            MathF.Min(1f, palette.WindowBackground.Y + 0.028f),
+            MathF.Min(1f, palette.WindowBackground.Z + 0.028f),
+            MathF.Min(1f, MathF.Max(0.38f, palette.WindowBackground.W)));
+        var headerBottom = new Vector4(palette.WindowBackground.X, palette.WindowBackground.Y, palette.WindowBackground.Z, 0f);
+        WindowEdgeFade.DrawUnified(palette.WindowBackground, palette.Accent, headerTop, headerBottom, 58f * ImGuiHelpers.GlobalScale, 5f * ImGuiHelpers.GlobalScale);
         var themePos = ImGui.GetCursorScreenPos();
         var themeSize = ImGui.GetContentRegionAvail();
         ProfileVisuals.DrawThemeBackdrop(ImGui.GetWindowDrawList(), themePos, themeSize, contact?.CloudThemeName ?? "Default", palette, ImGuiHelpers.GlobalScale);
@@ -194,7 +201,7 @@ internal sealed class OnlineProfileWindow : Window
     private void DrawProfileOverlay(ImDrawListPtr drawList, PrivateContact profile, float contentWidth, float scale)
     {
         var cursor = ImGui.GetCursorScreenPos();
-        var protrude = 6f * scale;
+        var protrude = 2f * scale;
         var pos = cursor + new Vector2(-protrude, 0f);
         var size = new Vector2(contentWidth + protrude * 2f, 126f * scale);
         var rounding = 7f * scale;
@@ -213,7 +220,7 @@ internal sealed class OnlineProfileWindow : Window
         ProfileVisuals.DrawThemeOverlay(drawList, pos, size, profile.CloudThemeName, palette, scale);
 
         var avatarSize = new Vector2(88f, 88f) * scale;
-        var avatarMin = pos + new Vector2(14f, 19f) * scale;
+        var avatarMin = pos + new Vector2(10f, 19f) * scale;
         var avatarMax = avatarMin + avatarSize;
         var texture = GetCloudProfileTexture(profile);
 
@@ -225,8 +232,8 @@ internal sealed class OnlineProfileWindow : Window
         var avatarBorder = UiColors.HexToRgba(NormalizeHex(profile.CloudAvatarBorderColorHex, "#2BE5B5"));
         drawList.AddRect(avatarMin, avatarMax, ImGui.GetColorU32(UiColors.WithAlpha(avatarBorder, 0.72f)), 7f * scale, ImDrawFlags.None, 1.4f * scale);
 
-        var textMin = new Vector2(avatarMax.X + 16f * scale, avatarMin.Y + 4f * scale);
-        var textMax = pos + size - new Vector2(14f, 12f) * scale;
+        var textMin = new Vector2(avatarMax.X + 12f * scale, avatarMin.Y + 4f * scale);
+        var textMax = pos + size - new Vector2(10f, 12f) * scale;
         var textWidth = MathF.Max(40f * scale, textMax.X - textMin.X);
         var displayName = profile.CloudDisplayName.Length > 0 ? profile.CloudDisplayName : profile.DisplayName;
         var identity = string.IsNullOrWhiteSpace(profile.World) ? profile.Name : $"{profile.Name}@{profile.World}";
@@ -234,7 +241,10 @@ internal sealed class OnlineProfileWindow : Window
         var statusColor = GetStatusColor(profile.Status);
 
         drawList.PushClipRect(textMin - new Vector2(1f, 1f) * scale, textMax, true);
-        ProfileNameEffects.DrawEffectText(drawList, textMin, TrimToWidth(displayName, textWidth, 15.2f * scale), profile.CloudDisplayNameEffect, palette.Title, 15.2f * scale, scale);
+        var displayFontSize = 15.2f * scale;
+        var displayVisible = TrimToWidth(displayName, textWidth, displayFontSize);
+        ProfileNameEffects.DrawEffectText(drawList, textMin, displayVisible, profile.CloudDisplayNameEffect, palette.Title, displayFontSize, scale);
+        DrawVenueBadgeBesideName(drawList, profile, textMin, displayVisible, textWidth, palette, scale);
         DrawTextWithShadow(drawList, textMin + new Vector2(0f, 24f) * scale, ImGui.GetColorU32(palette.Subtitle), TrimToWidth(identity, textWidth, 13.3f * scale), 13.3f * scale);
         DrawTextWithShadow(drawList, textMin + new Vector2(0f, 48f) * scale, ImGui.GetColorU32(UiColors.WithAlpha(statusColor, 0.96f)), statusText, 13.3f * scale);
         if (avatarDownloadInProgress && !string.IsNullOrWhiteSpace(profile.CloudAvatarUrl))
@@ -243,6 +253,114 @@ internal sealed class OnlineProfileWindow : Window
 
         ImGui.Dummy(new Vector2(contentWidth, size.Y + 8f * scale));
     }
+
+
+    private void DrawVenueBadgeBesideName(ImDrawListPtr drawList, PrivateContact profile, Vector2 namePos, string visibleName, float textWidth, ProfileVisuals.ThemePalette palette, float scale)
+    {
+        if (profile.Status == ContactStatus.Offline)
+            return;
+
+        var venueName = ResolveVenueNameForProfile(profile);
+        if (string.IsNullOrWhiteSpace(venueName))
+            return;
+
+        var fontSize = 12.6f * scale;
+        var nameWidth = ImGui.CalcTextSize(visibleName).X * (15.2f * scale / MathF.Max(1f, ImGui.GetFontSize()));
+        var badgePos = namePos + new Vector2(nameWidth + 8f * scale, 2.2f * scale);
+        var available = MathF.Max(0f, textWidth - nameWidth - 10f * scale);
+        if (available < 32f * scale)
+            return;
+
+        var text = TrimToWidth($"@At {venueName}", available, fontSize);
+        DrawTextWithShadow(drawList, badgePos, ImGui.GetColorU32(UiColors.WithAlpha(palette.Accent, 0.88f)), text, fontSize);
+    }
+
+    private string ResolveVenueNameForProfile(PrivateContact profile)
+    {
+        var address = BuildProfileVenueAddress(profile);
+        if (string.IsNullOrWhiteSpace(address))
+            return string.Empty;
+
+        var venues = (profile.CloudVenues ?? new List<PrivateVenueBookmark>())
+            .Concat(config.CloudSavedVenues ?? new List<PrivateVenueBookmark>())
+            .Where(v => !string.IsNullOrWhiteSpace(v.Name));
+
+        var normalizedAddress = NormalizeVenueAddress(address);
+        var match = venues.FirstOrDefault(v =>
+            string.Equals(NormalizeVenueAddress(v.Address), normalizedAddress, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(NormalizeVenueAddress(v.BuildAddress()), normalizedAddress, StringComparison.OrdinalIgnoreCase));
+        if (match != null)
+            return match.Name;
+
+        var dataCenter = string.IsNullOrWhiteSpace(profile.CurrentDataCenter) ? profile.DataCenter : profile.CurrentDataCenter;
+        var world = string.IsNullOrWhiteSpace(profile.CurrentWorld) ? profile.World : profile.CurrentWorld;
+        var district = ResolveResidentialDistrict(profile);
+        var wardText = ExtractHousingNumber(profile.ResidentialDetails, "Ward", "w");
+        var plotText = ExtractHousingNumber(profile.ResidentialDetails, "Plot", "p");
+        if (int.TryParse(wardText, out var ward) && int.TryParse(plotText, out var plot))
+            return ffxivVenuesService.FindByAddress(dataCenter, world, district, ward, plot)?.Name ?? string.Empty;
+
+        return string.Empty;
+    }
+
+    private static string BuildProfileVenueAddress(PrivateContact profile)
+    {
+        var dataCenter = string.IsNullOrWhiteSpace(profile.CurrentDataCenter) ? profile.DataCenter : profile.CurrentDataCenter;
+        var world = string.IsNullOrWhiteSpace(profile.CurrentWorld) ? profile.World : profile.CurrentWorld;
+        var district = ResolveResidentialDistrict(profile);
+        var ward = ExtractHousingNumber(profile.ResidentialDetails, "Ward", "w");
+        var plot = ExtractHousingNumber(profile.ResidentialDetails, "Plot", "p");
+        if (string.IsNullOrWhiteSpace(dataCenter) || string.IsNullOrWhiteSpace(world) || string.IsNullOrWhiteSpace(district) || string.IsNullOrWhiteSpace(ward) || string.IsNullOrWhiteSpace(plot))
+            return string.Empty;
+        return $"{dataCenter} {world} {district} w{ward} p{plot}";
+    }
+
+    private static string ResolveResidentialDistrict(PrivateContact profile)
+    {
+        var text = $"{profile.LastKnownZone} {profile.ResidentialDetails}";
+        if (text.Contains("Mist", StringComparison.OrdinalIgnoreCase)) return "Mist";
+        if (text.Contains("Lavender", StringComparison.OrdinalIgnoreCase) || text.Contains("Lavander", StringComparison.OrdinalIgnoreCase)) return "Lb";
+        if (text.Contains("Goblet", StringComparison.OrdinalIgnoreCase)) return "Goblet";
+        if (text.Contains("Shirogane", StringComparison.OrdinalIgnoreCase)) return "Shirogane";
+        if (text.Contains("Empyreum", StringComparison.OrdinalIgnoreCase)) return "Empyreum";
+        return string.Empty;
+    }
+
+    private static string ExtractHousingNumber(string text, string longMarker, string shortMarker)
+    {
+        var value = ExtractNumberAfter(text, longMarker);
+        return string.IsNullOrWhiteSpace(value) ? ExtractNumberAfter(text, shortMarker) : value;
+    }
+
+    private static string ExtractNumberAfter(string text, string marker)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(marker)) return string.Empty;
+        var comparison = StringComparison.OrdinalIgnoreCase;
+        var index = -1;
+        while (true)
+        {
+            index = text.IndexOf(marker, index + 1, comparison);
+            if (index < 0) return string.Empty;
+            var shortMarker = marker.Length == 1;
+            if (shortMarker && index > 0 && char.IsLetterOrDigit(text[index - 1]))
+                continue;
+            var start = index + marker.Length;
+            while (start < text.Length && !char.IsDigit(text[start])) start++;
+            if (start >= text.Length) continue;
+            var end = start;
+            while (end < text.Length && char.IsDigit(text[end])) end++;
+            return text[start..end];
+        }
+    }
+
+    private static string NormalizeVenueAddress(string value)
+        => (value ?? string.Empty)
+            .Replace("Lavender Beds", "Lb", StringComparison.OrdinalIgnoreCase)
+            .Replace("Lavander Beds", "Lb", StringComparison.OrdinalIgnoreCase)
+            .Replace("The Lavender Beds", "Lb", StringComparison.OrdinalIgnoreCase)
+            .Replace(",", " ", StringComparison.Ordinal)
+            .Replace("  ", " ", StringComparison.Ordinal)
+            .Trim();
 
     private static bool IsHiddenByPermission(string visibility)
         => string.Equals(visibility, "Nobody", StringComparison.OrdinalIgnoreCase);
