@@ -19,6 +19,7 @@ internal static unsafe class GameLocationResolver
         var residentialDetails = string.Empty;
         var zone = territoryName;
         var subdivision = false;
+        var isApartmentZone = IsApartmentZone(territoryName);
 
         if (housingManager != null)
         {
@@ -34,7 +35,7 @@ internal static unsafe class GameLocationResolver
                 originalTerritoryId = 0;
             }
 
-            if (originalTerritoryId != 0)
+            if (originalTerritoryId != 0 && !isApartmentZone)
             {
                 var originalTerritoryName = ResolveTerritoryName(dataManager, originalTerritoryId);
                 if (!string.IsNullOrWhiteSpace(originalTerritoryName))
@@ -46,9 +47,15 @@ internal static unsafe class GameLocationResolver
             var room = housingManager->GetCurrentRoom();
             var division = housingManager->GetCurrentDivision();
             subdivision = division == 2;
-            var hasResidentialContext = housingManager->CurrentTerritory is not null || IsKnownResidentialDistrict(zone);
+            var hasResidentialContext = housingManager->CurrentTerritory is not null || IsKnownResidentialDistrict(zone) || isApartmentZone;
 
-            if (ward > 0 && hasResidentialContext)
+            if (isApartmentZone && hasResidentialContext)
+            {
+                isResidential = true;
+                residentialDistrict = ResolveApartmentDistrict(zone);
+                residentialDetails = BuildApartmentDetails(room);
+            }
+            else if (ward > 0 && hasResidentialContext)
             {
                 isResidential = true;
                 residentialDistrict = ResolveResidentialDistrict(zone);
@@ -71,6 +78,9 @@ internal static unsafe class GameLocationResolver
             IsResidential = isResidential,
         };
     }
+
+    private static string BuildApartmentDetails(int room)
+        => room > 0 ? $"Apartment {room}" : "Apartment";
 
     private static string BuildResidentialDetails(int ward, int plot, int room, int division)
     {
@@ -164,6 +174,19 @@ internal static unsafe class GameLocationResolver
 
     private static bool IsKnownResidentialDistrict(string zone)
         => !string.IsNullOrWhiteSpace(ResolveResidentialDistrict(zone));
+
+    private static bool IsApartmentZone(string zone)
+        => !string.IsNullOrWhiteSpace(zone) && zone.Contains("Apartment", StringComparison.OrdinalIgnoreCase);
+
+    private static string ResolveApartmentDistrict(string zone)
+    {
+        if (zone.Contains("Sultana", StringComparison.OrdinalIgnoreCase)) return "Goblet";
+        if (zone.Contains("Topmast", StringComparison.OrdinalIgnoreCase)) return "Mist";
+        if (zone.Contains("Lily", StringComparison.OrdinalIgnoreCase)) return "Lavender Beds";
+        if (zone.Contains("Kobai", StringComparison.OrdinalIgnoreCase)) return "Shirogane";
+        if (zone.Contains("Ingleside", StringComparison.OrdinalIgnoreCase)) return "Empyreum";
+        return string.Empty;
+    }
 
     private static int ExtractNumber(string text, char prefix)
     {

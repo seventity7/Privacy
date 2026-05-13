@@ -60,4 +60,9 @@ public sealed class CloudProfileSnapshot
     public DateTimeOffset LastSeenAt { get; set; } = DateTimeOffset.MinValue;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.MinValue;
     public DateTimeOffset ProfileUpdatedAt { get; set; } = DateTimeOffset.MinValue;
+    public string PluginVersion { get; set; } = string.Empty;
+    [JsonPropertyName("plugin_version")] public string PluginVersionSnake { set => PluginVersion = value ?? string.Empty; }
+    public bool OutdatedPluginVersion { get; set; }
+    [JsonPropertyName("outdated_plugin_version")] public bool OutdatedPluginVersionSnake { set => OutdatedPluginVersion = value; }
 }
+

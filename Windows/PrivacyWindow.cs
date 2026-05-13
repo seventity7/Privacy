@@ -4,6 +4,7 @@ using Dalamud.Interface.ImGuiFileDialog;
 using Dalamud.Interface.Utility;
 using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
+using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Privacy.Models;
 using Privacy.Services;
@@ -47,6 +48,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private readonly Configuration config;
     private readonly PrivacyService listService;
     private readonly NativeCommandExecutor nativeCommands;
+    private readonly IDalamudPluginInterface pluginInterface;
     private readonly ProfileImageCache profileImages;
     private readonly GameIconCache gameIcons;
     private readonly FriendListService friendListService;
@@ -63,6 +65,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private readonly DotBackdropRenderer sidebarDotRenderer = new();
     private readonly FileDialogManager fileDialog = new();
     private readonly List<ManualDragRow> manualDragRows = new();
+    private bool mainWindowFocusedForManualDrag;
 
     private PrivateContact? pendingImageContact;
     private PrivateContact? quickNoteContact;
@@ -137,6 +140,13 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private DateTime refreshSyncCooldownBypassCheckedAtUtc = DateTime.MinValue;
     private string refreshSyncStatus = string.Empty;
     private DateTime refreshSyncStatusUntilUtc = DateTime.MinValue;
+    private string refreshSyncOverlayText = string.Empty;
+    private float refreshSyncOverlayProgress;
+    private bool refreshSyncOverlaySuccess;
+    private DateTime refreshSyncOverlayHideAtUtc = DateTime.MinValue;
+    private bool localPluginOutdated;
+    private bool versionCheckInProgress;
+    private DateTime nextVersionCheckAtUtc = DateTime.MinValue;
     private int pushedColorCount;
     private int pushedStyleVarCount;
 
@@ -154,6 +164,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         Configuration config,
         PrivacyService listService,
         NativeCommandExecutor nativeCommands,
+        IDalamudPluginInterface pluginInterface,
         ProfileImageCache profileImages,
         GameIconCache gameIcons,
         FriendListService friendListService,
@@ -172,6 +183,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         this.config = config;
         this.listService = listService;
         this.nativeCommands = nativeCommands;
+        this.pluginInterface = pluginInterface;
         this.profileImages = profileImages;
         this.gameIcons = gameIcons;
         this.friendListService = friendListService;
@@ -263,8 +275,10 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
     public override void Draw()
     {
-        friendListService.Refresh();
-        listService.RefreshRuntimeState(friendListService.Friends);
+        CheckPluginVersionIfNeeded();
+        var refreshOverlayActive = ShouldDrawRefreshSyncOverlay();
+        var outdatedOverlayActive = localPluginOutdated;
+        mainWindowFocusedForManualDrag = ImGui.IsWindowFocused(ImGuiFocusedFlags.RootAndChildWindows);
 
         var drawList = ImGui.GetWindowDrawList();
         var windowPos = ImGui.GetWindowPos();
@@ -274,6 +288,15 @@ internal sealed class PrivacyWindow : Window, IDisposable
         hasMainBackgroundBounds = false;
         DrawWindowChrome(drawList, windowPos, windowSize);
 
+        if (outdatedOverlayActive)
+        {
+            DrawOutdatedPluginOverlay(windowPos, windowSize);
+            return;
+        }
+
+        friendListService.Refresh();
+        listService.RefreshRuntimeState(friendListService.Friends);
+
         windowContentWidth = GetWindowContentRegionWidth();
         var style = ImGui.GetStyle();
         var scale = ImGuiHelpers.GlobalScale;
@@ -281,39 +304,166 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var bottomNavHeight = BottomNavigationHeight * scale;
         var mainColumnWidth = GetWindowContentRegionWidth();
 
-        hasTopSummaryPanelGeometry = false;
-        if (!config.HideTopBar)
-        {
-            using (ImRaii.PushId("top-summary"))
-                DrawTopSummaryPanel();
-        }
+        if (refreshOverlayActive)
+            ImGui.BeginDisabled();
 
-        if (config.WindowCollapsed)
+        try
         {
-            if (config.HideTopBar)
+            hasTopSummaryPanelGeometry = false;
+            if (!config.HideTopBar)
             {
-                using (ImRaii.PushId("collapsed-header"))
-                    DrawUIDHeader();
+                using (ImRaii.PushId("top-summary"))
+                    DrawTopSummaryPanel();
+            }
+
+            if (config.WindowCollapsed)
+            {
+                if (config.HideTopBar)
+                {
+                    using (ImRaii.PushId("collapsed-header"))
+                        DrawUIDHeader();
+                }
+                else
+                {
+                    using (ImRaii.PushId("top-summary-layer"))
+                        RedrawTopSummaryPanelOverlay();
+                }
+
+                if (!refreshOverlayActive)
+                {
+                    DrawDeferredPopups();
+                    fileDialog.Draw();
+                }
             }
             else
             {
-                using (ImRaii.PushId("top-summary-layer"))
-                    RedrawTopSummaryPanelOverlay();
-            }
+                var availableHeight = MathF.Max(1f, ImGui.GetContentRegionAvail().Y);
+                var bodyHeight = MathF.Max(1f, availableHeight - bottomNavHeight - style.ItemSpacing.Y);
+                DrawCompactMainColumn(drawList, mainColumnWidth, bodyHeight, gradientInset);
+                ImGui.SetCursorPosY(ImGui.GetCursorPosY() + style.ItemSpacing.Y);
+                DrawBottomNavigationBar(mainColumnWidth, bottomNavHeight);
 
-            DrawDeferredPopups();
-            fileDialog.Draw();
-            return;
+                if (!refreshOverlayActive)
+                {
+                    DrawDeferredPopups();
+                    fileDialog.Draw();
+                }
+            }
+        }
+        finally
+        {
+            if (refreshOverlayActive)
+                ImGui.EndDisabled();
         }
 
-        var availableHeight = MathF.Max(1f, ImGui.GetContentRegionAvail().Y);
-        var bodyHeight = MathF.Max(1f, availableHeight - bottomNavHeight - style.ItemSpacing.Y);
-        DrawCompactMainColumn(drawList, mainColumnWidth, bodyHeight, gradientInset);
-        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + style.ItemSpacing.Y);
-        DrawBottomNavigationBar(mainColumnWidth, bottomNavHeight);
+        DrawRefreshSyncOverlay(windowPos, windowSize);
+    }
 
-        DrawDeferredPopups();
-        fileDialog.Draw();
+
+    private void CheckPluginVersionIfNeeded()
+    {
+        if (versionCheckInProgress || DateTime.UtcNow < nextVersionCheckAtUtc)
+            return;
+
+        versionCheckInProgress = true;
+        nextVersionCheckAtUtc = DateTime.UtcNow.AddHours(6);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                localPluginOutdated = await cloudService.IsCurrentPluginVersionOutdatedAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                localPluginOutdated = false;
+            }
+            finally
+            {
+                versionCheckInProgress = false;
+            }
+        });
+    }
+
+    private void DrawOutdatedPluginOverlay(Vector2 windowPos, Vector2 windowSize)
+    {
+        if (!localPluginOutdated)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var message = "Outdated version detected. Please update \"Privacy\" to the newer version!";
+        var buttonLabel = "Update Privacy";
+        var fontSize = 18.5f * scale;
+        var buttonSize = new Vector2(170f, 30f) * scale;
+        var spacing = 12f * scale;
+        var rounding = 7f * scale;
+
+        var overlayMin = windowPos;
+        var overlayMax = windowPos + windowSize;
+
+        var textScale = fontSize / MathF.Max(1f, ImGui.GetFontSize());
+        var textSize = ImGui.CalcTextSize(message) * textScale;
+        var groupHeight = textSize.Y + spacing + buttonSize.Y;
+        var textScreenPos = new Vector2(
+            overlayMin.X + (windowSize.X - textSize.X) * 0.5f,
+            overlayMin.Y + (windowSize.Y - groupHeight) * 0.5f);
+        var buttonScreenPos = new Vector2(
+            overlayMin.X + (windowSize.X - buttonSize.X) * 0.5f,
+            textScreenPos.Y + textSize.Y + spacing);
+        var buttonMax = buttonScreenPos + buttonSize;
+
+        ImGui.SetCursorScreenPos(buttonScreenPos);
+        ImGui.PushStyleColor(ImGuiCol.Button, Vector4.Zero);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, Vector4.Zero);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, Vector4.Zero);
+        ImGui.PushStyleColor(ImGuiCol.Border, Vector4.Zero);
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, rounding);
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameBorderSize, 0f);
+        var clicked = ImGui.InvisibleButton("##PrivacyOutdatedUpdateButton", buttonSize);
+        var hovered = ImGui.IsItemHovered();
+        ImGui.PopStyleVar(2);
+        ImGui.PopStyleColor(4);
+
+        if (clicked)
+            RequestDalamudPluginUpdate();
+
+        var overlayDrawList = ImGui.GetWindowDrawList();
+        overlayDrawList.PushClipRect(overlayMin, overlayMax, true);
+        overlayDrawList.AddRectFilled(overlayMin, overlayMax, ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.86f)), rounding);
+
+        overlayDrawList.AddText(ImGui.GetFont(), fontSize, textScreenPos + new Vector2(1f, 1f) * scale, ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.72f)), message);
+        overlayDrawList.AddText(ImGui.GetFont(), fontSize, textScreenPos, ImGui.GetColorU32(new Vector4(1f, 0.45f, 0.48f, 1f)), message);
+
+        var buttonColor = hovered
+            ? UiColors.WithAlpha(config.AccentColor, 1f)
+            : UiColors.WithAlpha(config.AccentColor, 0.86f);
+        overlayDrawList.AddRectFilled(buttonScreenPos, buttonMax, ImGui.GetColorU32(buttonColor), rounding);
+        overlayDrawList.AddRect(buttonScreenPos, buttonMax, ImGui.GetColorU32(UiColors.WithAlpha(Vector4.One, hovered ? 0.42f : 0.24f)), rounding, ImDrawFlags.None, 1f * scale);
+
+        var buttonTextSize = ImGui.CalcTextSize(buttonLabel);
+        var buttonTextPos = buttonScreenPos + (buttonSize - buttonTextSize) * 0.5f;
+        overlayDrawList.AddText(buttonTextPos, ImGui.GetColorU32(Vector4.One), buttonLabel);
+        overlayDrawList.PopClipRect();
+    }
+
+    private void RequestDalamudPluginUpdate()
+    {
+        try
+        {
+            if (pluginInterface.OpenPluginInstallerTo(PluginInstallerOpenKind.UpdateablePlugins, "Privacy"))
+                return;
+
+            if (pluginInterface.OpenPluginInstallerTo(PluginInstallerOpenKind.InstalledPlugins, "Privacy"))
+                return;
+        }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "Privacy: failed to open Dalamud Plugin Installer through IDalamudPluginInterface.");
+        }
+
+        if (nativeCommands.Execute("/xlplugins", true))
+            return;
+
+        log.Warning("Privacy: could not open Dalamud Plugin Installer from outdated-version overlay.");
     }
 
     private void PushColor(ImGuiCol target, Vector4 color)
@@ -1519,6 +1669,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
     {
         refreshSyncInProgress = true;
         lastRefreshSyncAtUtc = DateTime.UtcNow;
+        SetRefreshSyncProgress("Preparing local runtime state...", 0.08f, false);
         SetRefreshSyncStatus("Refresh sync started.");
 
         CloudCharacterIdentity identity;
@@ -1533,6 +1684,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         catch (Exception ex)
         {
             refreshSyncInProgress = false;
+            refreshSyncOverlayHideAtUtc = DateTime.UtcNow.AddSeconds(1);
             log.Warning(ex, "Privacy: failed to prepare manual refresh sync on framework thread.");
             SetRefreshSyncStatus("Refresh sync failed before starting. Check /xllog for details.");
             return;
@@ -1541,14 +1693,25 @@ internal sealed class PrivacyWindow : Window, IDisposable
         if (!identity.IsUsable)
         {
             refreshSyncInProgress = false;
+            refreshSyncOverlayHideAtUtc = DateTime.UtcNow.AddSeconds(1);
             SetRefreshSyncStatus("Could not identify the current character.");
             return;
         }
 
+        var runOwnerOnlyOnlineRefresh = IsLatencyBryerGolem(identity);
+        if (runOwnerOnlyOnlineRefresh)
+            SetRefreshSyncProgress("Character Latency Bryer detected", 0.04f, false);
+
         _ = Task.Run(async () =>
         {
-            var result = await cloudService.RefreshSyncNowAsync(identity, presenceStatus, profileImages, CancellationToken.None).ConfigureAwait(false);
+            if (runOwnerOnlyOnlineRefresh)
+                await Task.Delay(700).ConfigureAwait(false);
+
+            var result = await cloudService.RefreshSyncNowAsync(identity, presenceStatus, profileImages, runOwnerOnlyOnlineRefresh, (stepText, stepProgress) => SetRefreshSyncProgress(stepText, stepProgress, false), CancellationToken.None).ConfigureAwait(false);
+            var success = string.Equals(result, "Refresh sync completed.", StringComparison.OrdinalIgnoreCase);
+            SetRefreshSyncProgress(success ? "Success!" : result, success ? 1f : refreshSyncOverlayProgress, success);
             refreshSyncInProgress = false;
+            refreshSyncOverlayHideAtUtc = DateTime.UtcNow.AddSeconds(success ? 1 : 3);
             SetRefreshSyncStatus(result);
         });
     }
@@ -1561,9 +1724,13 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
         refreshSyncCooldownBypassCheckedAtUtc = now;
         var identity = cloudService.GetLocalCharacterIdentity();
-        refreshSyncCooldownBypassed = string.Equals(identity.CharacterName, "Latency Bryer", StringComparison.OrdinalIgnoreCase);
+        refreshSyncCooldownBypassed = IsLatencyBryerGolem(identity);
         return refreshSyncCooldownBypassed;
     }
+
+    private static bool IsLatencyBryerGolem(CloudCharacterIdentity identity)
+        => string.Equals(identity.CharacterName, "Latency Bryer", StringComparison.OrdinalIgnoreCase) &&
+           string.Equals(identity.HomeWorld, "Golem", StringComparison.OrdinalIgnoreCase);
 
     private string BuildRefreshSyncTooltip(bool inProgress, bool coolingDown, TimeSpan remaining, bool bypassCooldown)
     {
@@ -1589,6 +1756,79 @@ internal sealed class PrivacyWindow : Window, IDisposable
         refreshSyncStatus = message;
         refreshSyncStatusUntilUtc = DateTime.UtcNow.AddSeconds(8);
         log.Information("Privacy: {Message}", message);
+    }
+
+    private void SetRefreshSyncProgress(string text, float progress, bool success)
+    {
+        refreshSyncOverlayText = text;
+        refreshSyncOverlayProgress = Math.Clamp(progress, 0f, 1f);
+        refreshSyncOverlaySuccess = success;
+        refreshSyncOverlayHideAtUtc = DateTime.MinValue;
+    }
+
+    private bool ShouldDrawRefreshSyncOverlay()
+        => refreshSyncInProgress || (refreshSyncOverlayHideAtUtc > DateTime.UtcNow && !string.IsNullOrWhiteSpace(refreshSyncOverlayText));
+
+    private void DrawRefreshSyncOverlay(Vector2 windowPos, Vector2 windowSize)
+    {
+        if (!ShouldDrawRefreshSyncOverlay())
+            return;
+
+        var flags = ImGuiWindowFlags.NoTitleBar |
+                    ImGuiWindowFlags.NoResize |
+                    ImGuiWindowFlags.NoMove |
+                    ImGuiWindowFlags.NoScrollbar |
+                    ImGuiWindowFlags.NoScrollWithMouse |
+                    ImGuiWindowFlags.NoSavedSettings |
+                    ImGuiWindowFlags.NoCollapse |
+                    ImGuiWindowFlags.NoNav;
+
+        ImGui.SetNextWindowPos(windowPos);
+        ImGui.SetNextWindowSize(windowSize);
+        using (ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, Vector2.Zero))
+        using (ImRaii.PushStyle(ImGuiStyleVar.WindowBorderSize, 0f))
+        using (ImRaii.PushColor(ImGuiCol.WindowBg, Vector4.Zero))
+        {
+            if (!ImGui.Begin("##privacy-refresh-sync-modal-overlay", flags))
+            {
+                ImGui.End();
+                return;
+            }
+
+            var scale = ImGuiHelpers.GlobalScale;
+            var drawList = ImGui.GetWindowDrawList();
+            var min = ImGui.GetWindowPos();
+            var size = ImGui.GetWindowSize();
+            var max = min + size;
+
+            drawList.AddRectFilled(min, max, Color(Alpha(Vector4.Zero, 0.68f)), 7f * scale);
+
+            ImGui.SetCursorScreenPos(min);
+            ImGui.InvisibleButton("##refresh-sync-overlay-blocker", size);
+
+            var panelSize = new Vector2(MathF.Min(380f * scale, size.X - 56f * scale), 92f * scale);
+            var panelPos = min + (size - panelSize) * 0.5f;
+            var panelMax = panelPos + panelSize;
+            var accent = refreshSyncOverlaySuccess ? UiColors.Online : config.AccentColor;
+            drawList.AddRectFilled(panelPos, panelMax, Color(Alpha(config.WindowBackgroundColor, 0.97f)), 10f * scale);
+            drawList.AddRect(panelPos, panelMax, Color(Alpha(accent, 0.78f)), 10f * scale, ImDrawFlags.None, 1.5f * scale);
+
+            var text = string.IsNullOrWhiteSpace(refreshSyncOverlayText) ? "Refreshing sync..." : refreshSyncOverlayText;
+            var textColor = refreshSyncOverlaySuccess ? UiColors.Online : UiColors.Text;
+            var textSize = ImGui.CalcTextSize(text);
+            var textPos = panelPos + new Vector2((panelSize.X - textSize.X) * 0.5f, 18f * scale);
+            DrawTextWithShadow(drawList, textPos, Color(textColor), text, 14f * scale);
+
+            var barPos = panelPos + new Vector2(24f * scale, 58f * scale);
+            var barSize = new Vector2(panelSize.X - 48f * scale, 12f * scale);
+            var barRounding = 6f * scale;
+            drawList.AddRectFilled(barPos, barPos + barSize, Color(Alpha(UiColors.TextDim, 0.18f)), barRounding);
+            var fillWidth = MathF.Max(barSize.Y, barSize.X * Math.Clamp(refreshSyncOverlayProgress, 0f, 1f));
+            drawList.AddRectFilled(barPos, barPos + new Vector2(fillWidth, barSize.Y), Color(Alpha(accent, 0.92f)), barRounding);
+            drawList.AddRect(barPos, barPos + barSize, Color(Alpha(accent, 0.45f)), barRounding, ImDrawFlags.None, 1f * scale);
+
+            ImGui.End();
+        }
     }
 
     private static string FormatCooldown(TimeSpan remaining)
@@ -3346,7 +3586,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
             var localMin = ImGui.GetWindowPos();
             var localMax = localMin + ImGui.GetWindowSize();
-            var hovered = ImGui.IsMouseHoveringRect(localMin, localMax);
+            var contactOutdated = IsContactPluginOutdated(contact);
+            var hovered = !contactOutdated && ImGui.IsMouseHoveringRect(localMin, localMax);
             var rounding = 3f * scale;
 
             var rowColor = GetContactRowColor(contact, hovered, compactGroupsMode, rowIndex, groupRowColor);
@@ -3389,15 +3630,16 @@ internal sealed class PrivacyWindow : Window, IDisposable
                 }
             }
 
-            if (!config.HideUserRowBackground && contact.Status == ContactStatus.Offline)
+            if (!config.HideUserRowBackground && (contact.Status == ContactStatus.Offline || contactOutdated))
             {
-                DrawFullWidthRowFill(drawList, rowBackgroundMin, rowBackgroundMax, new Vector4(0f, 0f, 0f, hovered ? 0.18f : 0.28f), rounding);
+                DrawFullWidthRowFill(drawList, rowBackgroundMin, rowBackgroundMax, new Vector4(0f, 0f, 0f, contactOutdated ? 0.46f : hovered ? 0.18f : 0.28f), rounding);
             }
 
-            if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+            if (!contactOutdated && hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
                 ImGui.OpenPopup("contact-context");
 
-            DrawContactContextPopup(contact);
+            if (!contactOutdated)
+                DrawContactContextPopup(contact);
         }
 
         if (!config.HideDivisors)
@@ -3469,7 +3711,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
     }
 
     private bool ShouldBlockManualRowDrag()
-        => quickNoteWindowOpen ||
+        => !mainWindowFocusedForManualDrag ||
+           quickNoteWindowOpen ||
            unregisteredProfileWindowOpen ||
            tagEditorWindowOpen ||
            openVenueLocationPopup ||
@@ -3804,6 +4047,9 @@ internal sealed class PrivacyWindow : Window, IDisposable
         list.Insert(insertIndex, item);
     }
 
+    private static bool IsContactPluginOutdated(PrivateContact contact)
+        => contact.OutdatedPluginVersion;
+
     private void DrawContactTexts(PrivateContact contact, Vector2 pos, float width)
     {
         DrawContactNameLine(contact, pos, width);
@@ -3812,8 +4058,19 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var safeWidth = MathF.Max(40f * scale, width);
         var drawList = ImGui.GetWindowDrawList();
         var isOffline = contact.Status == ContactStatus.Offline;
-        var hasStatusMessage = !isOffline && !string.IsNullOrWhiteSpace(contact.CloudStatusMessage);
+        var isOutdated = IsContactPluginOutdated(contact);
+        var hasStatusMessage = !isOffline && !isOutdated && !string.IsNullOrWhiteSpace(contact.CloudStatusMessage);
         var currentY = pos.Y + 22f * scale;
+
+        if (isOutdated)
+        {
+            var warning = "Temporarily unavailable. Outdated Privacy plugin version.";
+            var warningColor = new Vector4(1f, 0.45f, 0.48f, 1f);
+            drawList.PushClipRect(new Vector2(pos.X, currentY - 1f * scale), new Vector2(pos.X + safeWidth, currentY + 32f * scale), true);
+            DrawTextWithShadow(drawList, new Vector2(pos.X, currentY), Color(warningColor), warning, 13.4f * scale);
+            drawList.PopClipRect();
+            return;
+        }
 
         if (hasStatusMessage)
         {
@@ -4224,19 +4481,21 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var buttonWidth = MathF.Max(26f * scale, (fullWidth - spacing * 5f) / 6f);
         var x = pos.X;
 
-        var dimOffline = contact.Status == ContactStatus.Offline;
+        var dimOffline = contact.Status == ContactStatus.Offline || IsContactPluginOutdated(contact);
 
-        DrawActionButton(FontAwesomeIcon.Comment, "Tell", UiColors.PurpleHover, new Vector2(buttonWidth, buttonHeight), () => SendTell(contact), x, pos.Y, false, dimOffline);
+        var inputDisabled = IsContactPluginOutdated(contact);
+
+        DrawActionButton(FontAwesomeIcon.Comment, "Tell", UiColors.PurpleHover, new Vector2(buttonWidth, buttonHeight), () => SendTell(contact), x, pos.Y, inputDisabled, dimOffline);
         x += buttonWidth + spacing;
-        DrawActionButton(FontAwesomeIcon.Users, "Party", UiColors.CyanHover, new Vector2(buttonWidth, buttonHeight), () => InviteParty(contact), x, pos.Y, false, dimOffline);
+        DrawActionButton(FontAwesomeIcon.Users, "Party", UiColors.CyanHover, new Vector2(buttonWidth, buttonHeight), () => InviteParty(contact), x, pos.Y, inputDisabled, dimOffline);
         x += buttonWidth + spacing;
-        DrawActionButton(char.ConvertFromUtf32(0xE554), "Teleport to user", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => TravelTo(contact), x, pos.Y, false, dimOffline);
+        DrawActionButton(char.ConvertFromUtf32(0xE554), "Teleport to user", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => TravelTo(contact), x, pos.Y, inputDisabled, dimOffline);
         x += buttonWidth + spacing;
-        DrawActionButton(FontAwesomeIcon.Home, "Estate Teleportation", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => estateTeleportWindow.Open(contact), x, pos.Y, false, dimOffline);
+        DrawActionButton(FontAwesomeIcon.Home, "Estate Teleportation", UiColors.GoldHover, new Vector2(buttonWidth, buttonHeight), () => estateTeleportWindow.Open(contact), x, pos.Y, inputDisabled, dimOffline);
         x += buttonWidth + spacing;
-        DrawActionButton(FontAwesomeIcon.Tag, "Tag", config.AccentColor, new Vector2(buttonWidth, buttonHeight), () => OpenTagEditor(contact), x, pos.Y, false, dimOffline);
+        DrawActionButton(FontAwesomeIcon.Tag, "Tag", config.AccentColor, new Vector2(buttonWidth, buttonHeight), () => OpenTagEditor(contact), x, pos.Y, inputDisabled, dimOffline);
         x += buttonWidth + spacing;
-        DrawActionButton(FontAwesomeIcon.Book, "Notes", UiColors.BrownHover, new Vector2(buttonWidth, buttonHeight), () => notesWindow.Open(contact), x, pos.Y, false, dimOffline);
+        DrawActionButton(FontAwesomeIcon.Book, "Notes", UiColors.BrownHover, new Vector2(buttonWidth, buttonHeight), () => notesWindow.Open(contact), x, pos.Y, inputDisabled, dimOffline);
     }
 
     private void DrawActionButton(FontAwesomeIcon icon, string tooltip, Vector4 hoverColor, Vector2 size, Action click, float x, float y, bool inputDisabled = false, bool dimmed = false)

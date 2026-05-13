@@ -24,11 +24,11 @@ internal sealed unsafe class NativeCommandExecutor
 
         log.Information("Privacy: executing command {Command}", command);
 
-        // Lifestream's /li is a Dalamud plugin command, not a native game shell
-        // command. Process it through ICommandManager first, then fall back to the
-        // native shell for real game commands like /tell, /invite and /pcmd.
-        if (TryProcessDalamudCommand(command, suppressFailureLog))
-            return true;
+        // Dalamud-only commands are handled through Dalamud's command manager.
+        // Do not fall back to the native game shell for these commands, because
+        // the game shell does not know about /xlplugins, /xldev or other Dalamud UI commands.
+        if (IsDalamudOnlyCommand(command))
+            return TryProcessDalamudCommand(command, suppressFailureLog);
 
         return ExecuteNative(command, suppressFailureLog);
     }
@@ -147,6 +147,11 @@ internal sealed unsafe class NativeCommandExecutor
     }
 
     private static bool IsDalamudOnlyCommand(string command)
-        => command.StartsWith("/li ", StringComparison.OrdinalIgnoreCase) ||
-           string.Equals(command.Trim(), "/li", StringComparison.OrdinalIgnoreCase);
+    {
+        var trimmed = command.Trim();
+        return trimmed.StartsWith("/li ", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(trimmed, "/li", StringComparison.OrdinalIgnoreCase) ||
+               trimmed.StartsWith("/xlplugins ", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(trimmed, "/xlplugins", StringComparison.OrdinalIgnoreCase);
+    }
 }
