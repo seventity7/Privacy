@@ -117,6 +117,9 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private float windowContentWidth;
     private Vector2 windowClipMin;
     private Vector2 windowClipMax;
+    private bool hasScrollableRowClip;
+    private Vector2 scrollableRowClipMin;
+    private Vector2 scrollableRowClipMax;
     private Vector2 mainBackgroundMin;
     private Vector2 mainBackgroundMax;
     private bool hasMainBackgroundBounds;
@@ -2046,6 +2049,42 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private void DrawPairs()
     {
         manualDragRows.Clear();
+
+        if (config.ActiveView == 2)
+        {
+            DrawVenueCreator();
+            var venueListHeight = MathF.Max(1f, ImGui.GetContentRegionAvail().Y);
+
+            using (ImRaii.PushStyle(ImGuiStyleVar.ChildRounding, 2f * ImGuiHelpers.GlobalScale))
+            using (var venueList = ImRaii.Child("venue-list", new Vector2(windowContentWidth, venueListHeight), border: false))
+            {
+                if (venueList)
+                {
+                    var previousHasScrollableRowClip = hasScrollableRowClip;
+                    var previousScrollableRowClipMin = scrollableRowClipMin;
+                    var previousScrollableRowClipMax = scrollableRowClipMax;
+                    SetScrollableRowClipToCurrentWindow();
+
+                    try
+                    {
+                        DrawVenuesView(false, false);
+                    }
+                    finally
+                    {
+                        hasScrollableRowClip = previousHasScrollableRowClip;
+                        scrollableRowClipMin = previousScrollableRowClipMin;
+                        scrollableRowClipMax = previousScrollableRowClipMax;
+                    }
+                }
+            }
+
+            DrawManualDropPreview();
+            ClearManualDragIfReleased();
+            DrawPendingVenueNameSuggestions();
+            DrawVenueDeferredPopups();
+            return;
+        }
+
         var ySize = MathF.Max(1f, ImGui.GetContentRegionAvail().Y);
 
         using (ImRaii.PushStyle(ImGuiStyleVar.ChildRounding, 2f * ImGuiHelpers.GlobalScale))
@@ -2054,42 +2093,56 @@ internal sealed class PrivacyWindow : Window, IDisposable
             if (!list)
                 return;
 
-            if (config.ActiveView == 3)
+            var previousHasScrollableRowClip = hasScrollableRowClip;
+            var previousScrollableRowClipMin = scrollableRowClipMin;
+            var previousScrollableRowClipMax = scrollableRowClipMax;
+            SetScrollableRowClipToCurrentWindow();
+
+            try
             {
-                DrawDiscoverFriendList();
-                return;
-            }
+                if (config.ActiveView == 3)
+                {
+                    DrawDiscoverFriendList();
+                    return;
+                }
 
-            if (config.ActiveView == 4)
+                if (config.ActiveView == 4)
+                {
+                    DrawGroupsView();
+                    return;
+                }
+
+                if (config.ActiveView == 2)
+                {
+                    DrawVenuesView();
+                    return;
+                }
+
+                var showFavoritesOnly = config.ActiveView == 1;
+                var contacts = GetFilteredContacts()
+                    .Where(c => !showFavoritesOnly || c.Favorite)
+                    .ToList();
+
+                if (contacts.Count == 0)
+                {
+                    ImGui.AlignTextToFramePadding();
+                    using (ImRaii.PushStyle(ImGuiStyleVar.Alpha, 0.75f))
+                        ImGui.TextUnformatted(showFavoritesOnly ? "No favorites found." : "No contacts found.");
+                    return;
+                }
+
+                for (var i = 0; i < contacts.Count; i++)
+                    DrawContactRow(contacts[i], false, false, i);
+
+                DrawManualDropPreview();
+                ClearManualDragIfReleased();
+            }
+            finally
             {
-                DrawGroupsView();
-                return;
+                hasScrollableRowClip = previousHasScrollableRowClip;
+                scrollableRowClipMin = previousScrollableRowClipMin;
+                scrollableRowClipMax = previousScrollableRowClipMax;
             }
-
-            if (config.ActiveView == 2)
-            {
-                DrawVenuesView();
-                return;
-            }
-
-            var showFavoritesOnly = config.ActiveView == 1;
-            var contacts = GetFilteredContacts()
-                .Where(c => !showFavoritesOnly || c.Favorite)
-                .ToList();
-
-            if (contacts.Count == 0)
-            {
-                ImGui.AlignTextToFramePadding();
-                using (ImRaii.PushStyle(ImGuiStyleVar.Alpha, 0.75f))
-                    ImGui.TextUnformatted(showFavoritesOnly ? "No favorites found." : "No contacts found.");
-                return;
-            }
-
-            for (var i = 0; i < contacts.Count; i++)
-                DrawContactRow(contacts[i], false, false, i);
-
-            DrawManualDropPreview();
-            ClearManualDragIfReleased();
         }
     }
 
@@ -2247,9 +2300,10 @@ internal sealed class PrivacyWindow : Window, IDisposable
     }
 
 
-    private void DrawVenuesView()
+    private void DrawVenuesView(bool drawCreator = true, bool drawDeferredUi = true)
     {
-        DrawVenueCreator();
+        if (drawCreator)
+            DrawVenueCreator();
 
         var search = GetActiveSearchText();
         var venues = config.Venues
@@ -2265,8 +2319,12 @@ internal sealed class PrivacyWindow : Window, IDisposable
                     ImGui.TextUnformatted("No venues created yet.");
             }
 
-            DrawPendingVenueNameSuggestions();
-            DrawVenueDeferredPopups();
+            if (drawDeferredUi)
+            {
+                DrawPendingVenueNameSuggestions();
+                DrawVenueDeferredPopups();
+            }
+
             return;
         }
 
@@ -2282,10 +2340,13 @@ internal sealed class PrivacyWindow : Window, IDisposable
             venueRowsInputBlocked = previousVenueRowsInputBlocked;
         }
 
-        DrawManualDropPreview();
-        ClearManualDragIfReleased();
-        DrawPendingVenueNameSuggestions();
-        DrawVenueDeferredPopups();
+        if (drawDeferredUi)
+        {
+            DrawManualDropPreview();
+            ClearManualDragIfReleased();
+            DrawPendingVenueNameSuggestions();
+            DrawVenueDeferredPopups();
+        }
     }
 
     private void DrawVenueCreator()
@@ -3658,9 +3719,38 @@ internal sealed class PrivacyWindow : Window, IDisposable
         return new Vector2(windowClipMax.X - 19f * scale, rowMax.Y);
     }
 
+    private void SetScrollableRowClipToCurrentWindow()
+    {
+        var pos = ImGui.GetWindowPos();
+        var size = ImGui.GetWindowSize();
+        hasScrollableRowClip = true;
+        scrollableRowClipMin = new Vector2(pos.X, pos.Y);
+        scrollableRowClipMax = new Vector2(pos.X + size.X, pos.Y + size.Y);
+    }
+
+    private void GetRowDrawClip(out Vector2 min, out Vector2 max)
+    {
+        min = windowClipMin;
+        max = windowClipMax;
+
+        if (!hasScrollableRowClip)
+            return;
+
+        min = new Vector2(
+            MathF.Max(windowClipMin.X, scrollableRowClipMin.X),
+            MathF.Max(windowClipMin.Y, scrollableRowClipMin.Y));
+        max = new Vector2(
+            MathF.Min(windowClipMax.X, scrollableRowClipMax.X),
+            MathF.Min(windowClipMax.Y, scrollableRowClipMax.Y));
+    }
+
     private void DrawFullWidthRowFill(ImDrawListPtr drawList, Vector2 min, Vector2 max, Vector4 color, float rounding)
     {
-        drawList.PushClipRect(windowClipMin, windowClipMax, false);
+        GetRowDrawClip(out var clipMin, out var clipMax);
+        if (clipMax.X <= clipMin.X || clipMax.Y <= clipMin.Y)
+            return;
+
+        drawList.PushClipRect(clipMin, clipMax, false);
         drawList.AddRectFilled(min, max, Color(color), rounding);
         drawList.PopClipRect();
     }
@@ -5310,9 +5400,17 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var clear = Alpha(color, 0f);
         var y2 = y + thickness;
 
+        GetRowDrawClip(out var clipMin, out var clipMax);
+        var pushedClip = clipMax.X > clipMin.X && clipMax.Y > clipMin.Y;
+        if (pushedClip)
+            drawList.PushClipRect(clipMin, clipMax, false);
+
         drawList.AddRectFilledMultiColor(new Vector2(x1, y), new Vector2(x1 + fade, y2), Color(clear), Color(solid), Color(solid), Color(clear));
         drawList.AddRectFilled(new Vector2(x1 + fade, y), new Vector2(x2 - fade, y2), Color(solid));
         drawList.AddRectFilledMultiColor(new Vector2(x2 - fade, y), new Vector2(x2, y2), Color(solid), Color(clear), Color(clear), Color(solid));
+
+        if (pushedClip)
+            drawList.PopClipRect();
     }
 
     private void OpenImagePicker(PrivateContact contact)
