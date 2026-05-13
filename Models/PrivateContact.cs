@@ -57,6 +57,8 @@ public sealed class PrivateContact
     public string CloudBioVisibility { get; set; } = "All";
     public List<PrivateVenueBookmark> CloudVenues { get; set; } = new();
     public bool CloudManagedProfileImage { get; set; }
+    public string PluginVersion { get; set; } = string.Empty;
+    public bool OutdatedPluginVersion { get; set; }
     public DateTimeOffset CloudLastSyncedAt { get; set; } = DateTimeOffset.MinValue;
     public bool Favorite { get; set; }
     public bool IsPinned { get; set; }
@@ -70,14 +72,59 @@ public sealed class PrivateContact
         get
         {
             var dataCenter = string.IsNullOrWhiteSpace(CurrentDataCenter)
-                ? string.IsNullOrWhiteSpace(DataCenter) ? "Unknown DC" : DataCenter
-                : CurrentDataCenter;
+                ? string.IsNullOrWhiteSpace(DataCenter) ? "Unknown DC" : CurrentDataCenterFallback(DataCenter)
+                : CurrentDataCenter.Trim();
             var world = string.IsNullOrWhiteSpace(CurrentWorld)
-                ? string.IsNullOrWhiteSpace(World) ? "Unknown World" : World
-                : CurrentWorld;
-            var zone = string.IsNullOrWhiteSpace(LastKnownZone) ? "Unknown Zone" : LastKnownZone;
-            return $"{dataCenter} - {world} - {zone}";
+                ? string.IsNullOrWhiteSpace(World) ? "Unknown World" : World.Trim()
+                : CurrentWorld.Trim();
+            var zone = string.IsNullOrWhiteSpace(LastKnownZone) ? "Unknown Zone" : LastKnownZone.Trim();
+            return BuildDisplayLocation(dataCenter, world, zone);
         }
+    }
+
+    private static string CurrentDataCenterFallback(string dataCenter)
+        => string.IsNullOrWhiteSpace(dataCenter) ? "Unknown DC" : dataCenter.Trim();
+
+    private static string BuildDisplayLocation(string dataCenter, string world, string zone)
+    {
+        var cleanZone = NormalizeLocationText(zone);
+        var cleanDataCenter = NormalizeLocationText(dataCenter);
+        var cleanWorld = NormalizeLocationText(world);
+
+        if (StartsWithLocationPart(cleanZone, cleanDataCenter, cleanWorld) ||
+            string.Equals(cleanZone, $"{cleanDataCenter} - {cleanWorld}", StringComparison.OrdinalIgnoreCase))
+            return cleanZone;
+
+        if (cleanZone.StartsWith(cleanDataCenter + " - ", StringComparison.OrdinalIgnoreCase))
+            return cleanZone;
+
+        if (cleanZone.StartsWith(cleanWorld + " - ", StringComparison.OrdinalIgnoreCase))
+            return $"{cleanDataCenter} - {cleanZone}";
+
+        return $"{cleanDataCenter} - {cleanWorld} - {cleanZone}";
+    }
+
+    private static bool StartsWithLocationPart(string value, string dataCenter, string world)
+        => value.StartsWith($"{dataCenter} - {world} - ", StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizeLocationText(string value)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text))
+            return string.Empty;
+
+        text = text.Replace(" / ", " - ", StringComparison.Ordinal)
+                   .Replace(", ", " - ", StringComparison.Ordinal)
+                   .Replace(",", " - ", StringComparison.Ordinal);
+
+        while (text.Contains("  ", StringComparison.Ordinal))
+            text = text.Replace("  ", " ", StringComparison.Ordinal);
+        while (text.Contains(" -  - ", StringComparison.Ordinal))
+            text = text.Replace(" -  - ", " - ", StringComparison.Ordinal);
+        while (text.Contains("--", StringComparison.Ordinal))
+            text = text.Replace("--", "-", StringComparison.Ordinal);
+
+        return text.Trim(' ', '-');
     }
 
     public string DisplayName

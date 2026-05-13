@@ -94,12 +94,12 @@ public sealed class Plugin : IDalamudPlugin
         cloudService = new PrivacyCloudService(config, dataManager, clientState, objectTable, chatGui, pluginLog, ffxivVenuesService, condition);
         loginWindow = new LoginWindow(config, cloudService);
         myProfileWindow = new MyProfileWindow(config, cloudService, profileImages, gameIcons, ffxivVenuesService, dataManager, clientState);
-        onlineProfileWindow = new OnlineProfileWindow(config, profileImages, gameIcons, ffxivVenuesService);
+        onlineProfileWindow = new OnlineProfileWindow(config, profileImages, gameIcons, ffxivVenuesService, cloudService);
         notesWindow = new NotesWindow(config, pluginLog);
         settingsWindow = new SettingsWindow(config, profileImages, pluginInterface);
         estateTeleportWindow = new EstateTeleportWindow(config, privacyService, nativeCommands, pluginLog);
         contactProfileWindow = new ContactProfileWindow(config, pluginLog);
-        privacyWindow = new PrivacyWindow(config, privacyService, nativeCommands, profileImages, gameIcons, friendListService, ffxivVenuesService, cloudService, pluginLog, notesWindow, settingsWindow, estateTeleportWindow, contactProfileWindow, loginWindow, myProfileWindow, onlineProfileWindow);
+        privacyWindow = new PrivacyWindow(config, privacyService, nativeCommands, pluginInterface, profileImages, gameIcons, friendListService, ffxivVenuesService, cloudService, pluginLog, notesWindow, settingsWindow, estateTeleportWindow, contactProfileWindow, loginWindow, myProfileWindow, onlineProfileWindow);
 
         windowSystem.AddWindow(privacyWindow);
         windowSystem.AddWindow(loginWindow);

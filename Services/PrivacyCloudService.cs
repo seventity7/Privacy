@@ -246,7 +246,7 @@ internal sealed class PrivacyCloudService : IDisposable
     public ContactStatus GetCurrentPresenceStatusForRefresh()
         => config.AutoStatusByActivity ? ResolveAutomaticPresenceStatus() : config.CloudPresenceStatus;
 
-    public async Task<string> RefreshSyncNowAsync(CloudCharacterIdentity identity, ContactStatus presenceStatus, ProfileImageCache profileImages, CancellationToken cancellationToken = default)
+    public async Task<string> RefreshSyncNowAsync(CloudCharacterIdentity identity, ContactStatus presenceStatus, ProfileImageCache profileImages, bool refreshOnlineContactProfiles = false, Action<string, float>? progress = null, CancellationToken cancellationToken = default)
     {
         if (!config.CloudEnabled)
             return "Cloud sync is disabled.";
@@ -266,15 +266,35 @@ internal sealed class PrivacyCloudService : IDisposable
         syncInProgress = true;
         try
         {
+            progress?.Invoke("Refreshing FFXIV Venues catalog...", 0.22f);
             await ffxivVenuesService.RefreshAsync(true, cancellationToken).ConfigureAwait(false);
+
+            progress?.Invoke("Sending status and current location...", 0.44f);
             await SendHeartbeatAsync(identity, presenceStatus, cancellationToken).ConfigureAwait(false);
+
+            progress?.Invoke("Uploading profile settings...", 0.64f);
             await SyncOwnProfileAsync(profileImages, identity, cancellationToken).ConfigureAwait(false);
+
+            progress?.Invoke("Resolving online profiles...", 0.78f);
             await ResolveProfilesAsync(config.Contacts, profileImages, cancellationToken).ConfigureAwait(false);
 
+            if (refreshOnlineContactProfiles)
+            {
+                var onlineContacts = config.Contacts
+                    .Where(contact => contact.Status != ContactStatus.Offline)
+                    .ToList();
+
+                progress?.Invoke("Refreshing all online contact data...", 0.88f);
+                if (onlineContacts.Count > 0)
+                    await ResolveProfilesAsync(onlineContacts, profileImages, cancellationToken).ConfigureAwait(false);
+            }
+
+            progress?.Invoke("Saving refreshed data...", 0.94f);
             config.CloudLastResolveAt = DateTimeOffset.UtcNow;
             config.Save();
             nextHeartbeat = DateTime.UtcNow.AddSeconds(StableHeartbeatSeconds);
             nextProfileResolve = DateTime.UtcNow.AddSeconds(CloudManagedProfileResolveSeconds);
+            progress?.Invoke("Success!", 1f);
             return "Refresh sync completed.";
         }
         catch (Exception ex)
@@ -294,7 +314,7 @@ internal sealed class PrivacyCloudService : IDisposable
         listService.RefreshRuntimeState(friendListService.Friends);
         var identity = GetLocalCharacterIdentity();
         var presenceStatus = GetCurrentPresenceStatusForRefresh();
-        return await RefreshSyncNowAsync(identity, presenceStatus, profileImages, cancellationToken).ConfigureAwait(false);
+        return await RefreshSyncNowAsync(identity, presenceStatus, profileImages, false, null, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<string> SyncOwnProfileAsync(ProfileImageCache profileImages, CancellationToken cancellationToken = default)
@@ -320,6 +340,8 @@ internal sealed class PrivacyCloudService : IDisposable
         var payload = new
         {
             character = identity,
+            pluginVersion = CurrentPluginVersion,
+            plugin_version = CurrentPluginVersion,
             displayName = config.CloudProfileDisplayName,
             displayNameEffect = ProfileNameEffects.Normalize(config.CloudProfileDisplayNameEffect),
             display_name_effect = ProfileNameEffects.Normalize(config.CloudProfileDisplayNameEffect),
@@ -367,6 +389,8 @@ internal sealed class PrivacyCloudService : IDisposable
         var payload = new
         {
             character = identity,
+            pluginVersion = CurrentPluginVersion,
+            plugin_version = CurrentPluginVersion,
             displayName,
             display_name = displayName,
             displayNameEffect = ProfileNameEffects.Normalize(displayNameEffect),
@@ -471,6 +495,8 @@ internal sealed class PrivacyCloudService : IDisposable
         var response = await PostAsync<object>("presence/heartbeat", new
         {
             character = identity,
+            pluginVersion = CurrentPluginVersion,
+            plugin_version = CurrentPluginVersion,
             status = NormalizePresenceStatus(presenceStatus),
             timestamp = DateTimeOffset.UtcNow,
             profile = new
@@ -516,33 +542,10 @@ internal sealed class PrivacyCloudService : IDisposable
 
     public async Task ResolveProfilesAsync(IReadOnlyList<PrivateContact> contacts, ProfileImageCache profileImages, CancellationToken cancellationToken = default)
     {
-        if (contacts.Count == 0)
+        var profiles = await FetchProfileSnapshotsAsync(contacts, cancellationToken).ConfigureAwait(false);
+        if (profiles.Count == 0)
             return;
 
-        var candidates = contacts
-            .Where(c => !string.IsNullOrWhiteSpace(c.Name) && (!string.IsNullOrWhiteSpace(c.World) || c.WorldId != 0 || c.ContentId != 0))
-            .Select(c => new
-            {
-                localId = c.Id,
-                name = c.Name,
-                world = c.World,
-                worldId = c.WorldId,
-                contentId = c.ContentId,
-            })
-            .ToList();
-
-        if (candidates.Count == 0)
-            return;
-
-        var response = await PostAsync<ResolveProfilesResponse>("profiles/resolve", new
-        {
-            contacts = candidates,
-        }, cancellationToken).ConfigureAwait(false);
-
-        if (!response.Success || response.Value == null)
-            return;
-
-        var profiles = response.Value.GetProfiles();
         foreach (var profile in profiles)
         {
             var contact = FindMatchingContact(contacts, profile);
@@ -553,6 +556,48 @@ internal sealed class PrivacyCloudService : IDisposable
         }
 
         config.CloudLastResolveAt = DateTimeOffset.UtcNow;
+    }
+
+    public async Task<CloudProfileSnapshot?> FetchProfileSnapshotAsync(PrivateContact contact, CancellationToken cancellationToken = default)
+    {
+        var results = await FetchProfileSnapshotsAsync(new[] { contact }, cancellationToken).ConfigureAwait(false);
+        return results.FirstOrDefault();
+    }
+
+    public async Task<List<CloudProfileSnapshot>> FetchProfileSnapshotsAsync(IReadOnlyList<PrivateContact> contacts, CancellationToken cancellationToken = default)
+    {
+        if (contacts.Count == 0)
+            return new List<CloudProfileSnapshot>();
+
+        var candidates = contacts
+            .Where(c => !string.IsNullOrWhiteSpace(c.CloudProfileId) ||
+                        (!string.IsNullOrWhiteSpace(c.Name) && (!string.IsNullOrWhiteSpace(c.World) || c.WorldId != 0 || c.ContentId != 0)))
+            .Select(c => new
+            {
+                localId = c.Id,
+                profileId = c.CloudProfileId,
+                userId = c.CloudProfileId,
+                name = c.Name,
+                world = c.World,
+                worldId = c.WorldId,
+                contentId = c.ContentId,
+            })
+            .ToList();
+
+        if (candidates.Count == 0)
+            return new List<CloudProfileSnapshot>();
+
+        var response = await PostAsync<ResolveProfilesResponse>("profiles/resolve", new
+        {
+            contacts = candidates,
+            force = true,
+            bypassCache = true,
+        }, cancellationToken).ConfigureAwait(false);
+
+        if (!response.Success || response.Value == null)
+            return new List<CloudProfileSnapshot>();
+
+        return response.Value.GetProfiles().ToList();
     }
 
     public CloudCharacterIdentity GetLocalCharacterIdentity()
@@ -577,9 +622,7 @@ internal sealed class PrivacyCloudService : IDisposable
             identity.ContentId = ResolveLocalContentId(localPlayer);
             var location = GameLocationResolver.GetCurrent(dataManager, clientState);
             identity.Zone = location.Zone;
-            identity.ResidentialDetails = string.IsNullOrWhiteSpace(location.ResidentialDetails)
-                ? PrivacyService.BuildResidentialDetails(identity.Zone)
-                : location.ResidentialDetails;
+            identity.ResidentialDetails = location.ResidentialDetails ?? string.Empty;
 
             LogLocalIdentityResolved(identity);
         }
@@ -632,6 +675,8 @@ internal sealed class PrivacyCloudService : IDisposable
         contact.CloudLocationVisibility = string.IsNullOrWhiteSpace(profile.LocationVisibility) ? "All" : profile.LocationVisibility;
         contact.CloudBioVisibility = string.IsNullOrWhiteSpace(profile.BioVisibility) ? "All" : profile.BioVisibility;
         contact.CloudVenues = profile.Venues ?? new List<PrivateVenueBookmark>();
+        contact.PluginVersion = profile.PluginVersion;
+        contact.OutdatedPluginVersion = profile.OutdatedPluginVersion;
         contact.CloudLastSyncedAt = DateTimeOffset.UtcNow;
 
         if (!string.IsNullOrWhiteSpace(profile.DisplayName) && string.IsNullOrWhiteSpace(contact.Nickname))
@@ -939,6 +984,70 @@ internal sealed class PrivacyCloudService : IDisposable
         }
 
         return GetLocalCharacterIdentity();
+    }
+
+
+    public static string CurrentPluginVersion
+    {
+        get
+        {
+            var info = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            if (!string.IsNullOrWhiteSpace(info))
+                return info.Split('+')[0].Trim();
+
+            return Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0";
+        }
+    }
+
+    public async Task<bool> IsCurrentPluginVersionOutdatedAsync(CancellationToken cancellationToken = default)
+    {
+        var latest = await FetchLatestPluginVersionAsync(cancellationToken).ConfigureAwait(false);
+        return IsVersionNewer(latest, CurrentPluginVersion);
+    }
+
+    private async Task<string> FetchLatestPluginVersionAsync(CancellationToken cancellationToken)
+    {
+        if (!TryGetApiBaseUri(out var apiBase))
+            return string.Empty;
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(apiBase, "v1/plugin/version"));
+            if (!string.IsNullOrWhiteSpace(config.CloudAccessToken))
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", config.CloudAccessToken);
+
+            using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+                return string.Empty;
+
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            var value = JsonSerializer.Deserialize<PluginVersionResponse>(body, JsonOptions);
+            return value?.LatestVersion ?? string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static bool IsVersionNewer(string latest, string current)
+    {
+        if (string.IsNullOrWhiteSpace(latest) || string.IsNullOrWhiteSpace(current))
+            return false;
+
+        if (Version.TryParse(TrimVersion(latest), out var latestVersion) && Version.TryParse(TrimVersion(current), out var currentVersion))
+            return latestVersion > currentVersion;
+
+        return string.Compare(latest.Trim(), current.Trim(), StringComparison.OrdinalIgnoreCase) > 0;
+    }
+
+    private static string TrimVersion(string value)
+    {
+        var text = (value ?? string.Empty).Trim();
+        var dash = text.IndexOf('-', StringComparison.Ordinal);
+        if (dash >= 0)
+            text = text[..dash];
+        return text;
     }
 
     private async Task<ApiResult<T>> PostAsync<T>(string path, object payload, CancellationToken cancellationToken)
@@ -1351,13 +1460,90 @@ internal sealed class PrivacyCloudService : IDisposable
 
     private uint ResolveWorldRowId(object localPlayer, string propertyName)
     {
-        var world = localPlayer.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlayer);
-        var rowId = world?.GetType().GetProperty("RowId", BindingFlags.Public | BindingFlags.Instance)?.GetValue(world);
+        try
+        {
+            if (localPlayer is IPlayerCharacter player)
+            {
+                var directRowId = string.Equals(propertyName, "CurrentWorld", StringComparison.OrdinalIgnoreCase)
+                    ? player.CurrentWorld.RowId
+                    : player.HomeWorld.RowId;
+                if (directRowId != 0)
+                    return directRowId;
+            }
+        }
+        catch
+        {
+        }
+
+        foreach (var name in BuildWorldPropertyCandidates(propertyName))
+        {
+            var world = localPlayer.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlayer);
+            var directValue = ReadWorldIdValue(world);
+            if (directValue != 0)
+                return directValue;
+        }
+
+        foreach (var name in BuildWorldIdPropertyCandidates(propertyName))
+        {
+            var value = localPlayer.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlayer);
+            var directValue = ReadWorldIdValue(value);
+            if (directValue != 0)
+                return directValue;
+        }
+
+        return 0u;
+    }
+
+    private static IEnumerable<string> BuildWorldPropertyCandidates(string propertyName)
+    {
+        yield return propertyName;
+        if (string.Equals(propertyName, "CurrentWorld", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "World";
+            yield return "CurrentWorldGameData";
+        }
+        else if (string.Equals(propertyName, "HomeWorld", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "HomeWorldGameData";
+        }
+    }
+
+    private static IEnumerable<string> BuildWorldIdPropertyCandidates(string propertyName)
+    {
+        if (string.Equals(propertyName, "CurrentWorld", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "CurrentWorldId";
+            yield return "CurrentWorldID";
+            yield return "WorldId";
+            yield return "WorldID";
+        }
+        else if (string.Equals(propertyName, "HomeWorld", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return "HomeWorldId";
+            yield return "HomeWorldID";
+        }
+    }
+
+    private static uint ReadWorldIdValue(object? value)
+    {
+        if (value == null)
+            return 0u;
+
+        switch (value)
+        {
+            case uint u: return u;
+            case ushort us: return us;
+            case int i when i > 0: return (uint)i;
+            case long l when l > 0: return (uint)l;
+        }
+
+        var rowId = value.GetType().GetProperty("RowId", BindingFlags.Public | BindingFlags.Instance)?.GetValue(value);
         return rowId switch
         {
             uint u => u,
             ushort us => us,
             int i when i > 0 => (uint)i,
+            long l when l > 0 => (uint)l,
             _ => 0u,
         };
     }
@@ -1478,6 +1664,8 @@ internal sealed class PrivacyCloudService : IDisposable
                         LastSeenAt = ParseDate(result.Presence?.LastSeenAt),
                         UpdatedAt = ParseDate(result.Presence?.UpdatedAt),
                         ProfileUpdatedAt = ParseDate(result.Profile?.UpdatedAt),
+                        PluginVersion = result.PluginVersion ?? result.Presence?.PluginVersion ?? string.Empty,
+                        OutdatedPluginVersion = result.OutdatedPluginVersion || (result.Presence?.OutdatedPluginVersion ?? false),
                     };
 
                     if (snapshot.UpdatedAt == DateTimeOffset.MinValue)
@@ -1504,6 +1692,10 @@ internal sealed class PrivacyCloudService : IDisposable
         public string? ContentId { get; set; }
         public CloudProfileDto? Profile { get; set; }
         public CloudPresenceDto? Presence { get; set; }
+        public string? PluginVersion { get; set; }
+        public bool OutdatedPluginVersion { get; set; }
+        [JsonPropertyName("plugin_version")] public string? PluginVersionSnake { set => PluginVersion = value; }
+        [JsonPropertyName("outdated_plugin_version")] public bool OutdatedPluginVersionSnake { set => OutdatedPluginVersion = value; }
     }
 
     private sealed class CloudProfileDto
@@ -1547,6 +1739,10 @@ internal sealed class PrivacyCloudService : IDisposable
         public string? UpdatedAt { get; set; }
         public string? Status { get; set; }
         public string? StatusText { get; set; }
+        public string? PluginVersion { get; set; }
+        public bool OutdatedPluginVersion { get; set; }
+        [JsonPropertyName("plugin_version")] public string? PluginVersionSnake { set => PluginVersion = value; }
+        [JsonPropertyName("outdated_plugin_version")] public bool OutdatedPluginVersionSnake { set => OutdatedPluginVersion = value; }
     }
 
     private sealed class CloudProfilePermissionsDto
@@ -1569,11 +1765,21 @@ internal sealed class PrivacyCloudService : IDisposable
         public string? UpdatedAt { get; set; }
         public string? Status { get; set; }
         public string? StatusText { get; set; }
+        public string? PluginVersion { get; set; }
+        public bool OutdatedPluginVersion { get; set; }
+        [JsonPropertyName("plugin_version")] public string? PluginVersionSnake { set => PluginVersion = value; }
+        [JsonPropertyName("outdated_plugin_version")] public bool OutdatedPluginVersionSnake { set => OutdatedPluginVersion = value; }
     }
 
     private sealed class AvatarUploadResponse
     {
         public string? AvatarUrl { get; set; }
+    }
+
+    private sealed class PluginVersionResponse
+    {
+        public string? LatestVersion { get; set; }
+        [JsonPropertyName("latest_version")] public string? LatestVersionSnake { set => LatestVersion = value; }
     }
 
     private sealed class ErrorResponse

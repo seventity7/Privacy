@@ -17,6 +17,8 @@ using System.Numerics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace Privacy.Windows;
 
@@ -89,6 +91,10 @@ internal sealed class MyProfileWindow : Window
     private string favoriteVenueTagBuffer = string.Empty;
     private string favoriteVenueTagColorHex = "#B56CFF";
     private string favoriteVenueTagError = string.Empty;
+    private PrivateVenueBookmark? editingFavoriteVenueTooltipTag;
+    private string editingFavoriteVenueTooltipTagBuffer = string.Empty;
+    private string editingFavoriteVenueTooltipTagColorHex = "#B56CFF";
+    private string editingFavoriteVenueTooltipTagError = string.Empty;
     private int favoriteVenueCarouselOffset;
     private readonly HashSet<string> pendingVenueImageDownloads = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> pendingBannerDownloads = new(StringComparer.OrdinalIgnoreCase);
@@ -97,6 +103,16 @@ internal sealed class MyProfileWindow : Window
     private Vector2 resetFieldsPopupPos;
     private int pushedColorCount;
     private int pushedStyleVarCount;
+    private bool debugOverlayActive;
+    private bool debugSuccess;
+    private string debugProgressText = string.Empty;
+    private float debugProgress;
+    private bool debugWindowOpen;
+    private string debugReport = string.Empty;
+    private string debugReportTitle = "Profile Sync Debug";
+    private bool ownerProbeInitialized;
+    private bool ownerProbeResult;
+    private DateTime ownerProbeNextAt = DateTime.MinValue;
 
     public MyProfileWindow(Configuration config, PrivacyCloudService cloudService, ProfileImageCache profileImages, GameIconCache gameIcons, FfxivVenuesService ffxivVenuesService, IDataManager dataManager, IClientState clientState)
         : base("My Profile###PrivacyMyProfile")
@@ -209,6 +225,11 @@ internal sealed class MyProfileWindow : Window
 
         ThemedWidgets.FadeSeparator(config.AccentColor);
         DrawVenuesSection();
+
+        if (debugOverlayActive)
+            DrawDebugProgressOverlay();
+
+        DrawDebugReportWindow();
     }
 
     private void DrawHeader()
@@ -484,7 +505,7 @@ internal sealed class MyProfileWindow : Window
         var themeIndex = Array.FindIndex(ProfileVisuals.ThemeNames, t => string.Equals(t, profileThemeName, StringComparison.OrdinalIgnoreCase));
         if (themeIndex < 0) themeIndex = 0;
         ImGui.SetNextItemWidth(150f * scale);
-        if (DrawThemeSelector("##profile_theme_name", ref themeIndex, scale, UiColors.HexToRgba(NormalizeHex(profileThemeColorHex, "#2BE5B5"))))
+        if (DrawThemeSelector("##profile_theme_name", ref themeIndex, scale, config.AccentColor))
             profileThemeName = ProfileVisuals.ThemeNames[Math.Clamp(themeIndex, 0, ProfileVisuals.ThemeNames.Length - 1)];
 
         ImGui.SameLine();
@@ -505,6 +526,7 @@ internal sealed class MyProfileWindow : Window
         if (ImGui.ColorEdit4("Avatar border", ref borderColor, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.AlphaPreviewHalf))
             profileAvatarBorderColorHex = ColorToHex(borderColor);
 
+        ImGui.TextColored(config.AccentColor, "Banner image:");
         var bannerWidth = MathF.Min(MathF.Max(220f * scale, profileEditorFieldWidth), MathF.Max(180f * scale, availableWidth - 28f * scale));
         ImGui.SetNextItemWidth(bannerWidth);
         using (ImRaii.PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.62f)))
@@ -626,7 +648,7 @@ internal sealed class MyProfileWindow : Window
         ImGui.SameLine();
         ImGui.TextColored(palette.Title, "Location");
         ImGui.Indent(18f * scale);
-        ImGui.TextColored(palette.Subtitle, string.IsNullOrWhiteSpace(preview.LastKnownZone) ? "Unknown location." : FormatVenueLocationText(preview.LastKnownZone));
+        ImGui.TextColored(palette.Subtitle, string.IsNullOrWhiteSpace(preview.DisplayLocation) ? "Unknown location." : FormatVenueLocationText(preview.DisplayLocation));
         if (!string.IsNullOrWhiteSpace(preview.ResidentialDetails))
             ImGui.TextColored(palette.Subtitle, preview.ResidentialDetails);
         ImGui.Unindent(18f * scale);
@@ -657,14 +679,12 @@ internal sealed class MyProfileWindow : Window
         if (string.IsNullOrWhiteSpace(displayName))
             displayName = "Your profile";
 
-        var name = string.IsNullOrWhiteSpace(config.CloudLinkedCharacterName) ? displayName : config.CloudLinkedCharacterName;
-        var currentWorldId = ResolveLocalCurrentWorldId();
-        var world = ResolveWorldName(currentWorldId);
-        if (string.IsNullOrWhiteSpace(world))
-            world = config.CloudLinkedWorld;
-        var dataCenter = ResolveDataCenterName(currentWorldId);
-        if (string.IsNullOrWhiteSpace(dataCenter))
-            dataCenter = ResolveDataCenterForWorld(world);
+        var identity = clientState.IsLoggedIn ? cloudService.GetLocalCharacterIdentity() : new CloudCharacterIdentity();
+        var name = !string.IsNullOrWhiteSpace(identity.CharacterName)
+            ? identity.CharacterName
+            : string.IsNullOrWhiteSpace(config.CloudLinkedCharacterName) ? displayName : config.CloudLinkedCharacterName;
+        var world = !string.IsNullOrWhiteSpace(identity.CurrentWorld) ? identity.CurrentWorld : config.CloudLinkedWorld;
+        var dataCenter = !string.IsNullOrWhiteSpace(identity.CurrentDataCenter) ? identity.CurrentDataCenter : ResolveDataCenterForWorld(world);
         var location = BuildPreviewLocationLine(world, dataCenter, out var residentialDetails);
 
         return new PrivateContact
@@ -777,6 +797,8 @@ internal sealed class MyProfileWindow : Window
             drawList.AddImageRounded(bannerTexture.Handle, pos, pos + size, Vector2.Zero, Vector2.One, ImGui.GetColorU32(UiColors.WithAlpha(Vector4.One, 0.42f)), rounding);
         drawList.AddRect(pos, pos + size, ImGui.GetColorU32(UiColors.WithAlpha(themeAccent, 0.42f)), rounding, ImDrawFlags.None, 1f * scale);
         ProfileVisuals.DrawThemeOverlay(drawList, pos, size, profile.CloudThemeName, palette, scale);
+        if (IsOwnerCharacter())
+            DrawSelfDebugButton(profile, pos, size, palette, scale);
 
         var avatarSize = new Vector2(88f, 88f) * scale;
         var avatarMin = pos + new Vector2(14f, 19f) * scale;
@@ -818,6 +840,418 @@ internal sealed class MyProfileWindow : Window
         drawList.PopClipRect();
 
         ImGui.Dummy(new Vector2(contentWidth, size.Y + 8f * scale));
+    }
+
+    private void DrawSelfDebugButton(PrivateContact profile, Vector2 panelPos, Vector2 panelSize, ProfileVisuals.ThemePalette palette, float scale)
+    {
+        var previousCursor = ImGui.GetCursorScreenPos();
+        var buttonSize = new Vector2(24f, 22f) * scale;
+        var pos = panelPos + new Vector2(panelSize.X - buttonSize.X - 10f * scale, 10f * scale);
+        var icon = char.ConvertFromUtf32(0xF01E);
+        var drawList = ImGui.GetWindowDrawList();
+
+        ImGui.SetCursorScreenPos(pos);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var iconSize = ImGui.CalcTextSize(icon);
+            var iconPos = pos + new Vector2((buttonSize.X - iconSize.X) * 0.5f, (buttonSize.Y - iconSize.Y) * 0.5f);
+            drawList.AddText(iconPos, ImGui.GetColorU32(palette.Title), icon);
+        }
+
+        ImGui.SetCursorScreenPos(pos);
+        if (ImGui.InvisibleButton("##verify-own-cloud-profile", buttonSize) && !debugOverlayActive)
+            StartSelfCloudProfileDebug();
+
+        if (ImGui.IsItemHovered() && !debugOverlayActive)
+            ImGui.SetTooltip("Verify Cloud Profile");
+
+        ImGui.SetCursorScreenPos(previousCursor);
+    }
+
+    private bool IsOwnerCharacter()
+    {
+        var now = DateTime.UtcNow;
+        if (ownerProbeInitialized && now < ownerProbeNextAt)
+            return ownerProbeResult;
+
+        ownerProbeInitialized = true;
+        ownerProbeNextAt = now.AddSeconds(5);
+        var identity = cloudService.GetLocalCharacterIdentity();
+        ownerProbeResult = string.Equals(identity.CharacterName, "Latency Bryer", StringComparison.OrdinalIgnoreCase) &&
+                           string.Equals(identity.HomeWorld, "Golem", StringComparison.OrdinalIgnoreCase);
+        return ownerProbeResult;
+    }
+
+    private void StartSelfCloudProfileDebug()
+    {
+        var renderedProfile = BuildSelfOnlineProfilePreview();
+        var lookupTarget = BuildSelfCloudLookupTarget(renderedProfile);
+        debugOverlayActive = true;
+        debugSuccess = false;
+        debugProgress = 0.05f;
+        debugProgressText = "Preparing profile verification...";
+        debugReport = string.Empty;
+
+        Task.Run(async () =>
+        {
+            try
+            {
+                SetDebugProgress("Fetching cloud profile...", 0.25f, false);
+                var cloud = await cloudService.FetchProfileSnapshotAsync(lookupTarget, CancellationToken.None).ConfigureAwait(false);
+
+                SetDebugProgress("Building rendered profile snapshot...", 0.55f, false);
+                var rendered = BuildRenderedDebugSnapshot(renderedProfile);
+
+                SetDebugProgress("Comparing cloud data with rendered data...", 0.78f, false);
+                var report = BuildSelfDebugReport(cloud, rendered);
+
+                SetDebugProgress("Success!", 1f, true);
+                await Task.Delay(1000).ConfigureAwait(false);
+                debugReportTitle = "Profile Sync Debug - My Profile";
+                debugReport = report;
+                debugWindowOpen = true;
+            }
+            catch (Exception ex)
+            {
+                debugReportTitle = "Profile Sync Debug - My Profile";
+                debugReport = "Profile verification failed.\n\n" + ex.Message;
+                debugWindowOpen = true;
+            }
+            finally
+            {
+                debugOverlayActive = false;
+                debugSuccess = false;
+                debugProgress = 0f;
+                debugProgressText = string.Empty;
+            }
+        });
+    }
+
+    private PrivateContact BuildSelfCloudLookupTarget(PrivateContact renderedProfile)
+    {
+        var identity = clientState.IsLoggedIn ? cloudService.GetLocalCharacterIdentity() : new CloudCharacterIdentity();
+        var homeWorld = !string.IsNullOrWhiteSpace(identity.HomeWorld) ? identity.HomeWorld : config.CloudLinkedWorld;
+        var homeWorldId = identity.HomeWorldId != 0 ? identity.HomeWorldId : config.CloudLinkedWorldId;
+        var contentId = identity.ContentId != 0 ? identity.ContentId : config.CloudLinkedContentId;
+        var characterName = !string.IsNullOrWhiteSpace(identity.CharacterName) ? identity.CharacterName : config.CloudLinkedCharacterName;
+        var dataCenter = !string.IsNullOrWhiteSpace(identity.DataCenter) ? identity.DataCenter : ResolveDataCenterForWorld(homeWorld);
+
+        return new PrivateContact
+        {
+            Id = "self-profile-cloud-lookup",
+            Name = characterName,
+            World = homeWorld,
+            WorldId = homeWorldId,
+            ContentId = contentId,
+            DataCenter = dataCenter,
+            CurrentWorld = renderedProfile.CurrentWorld,
+            CurrentWorldId = identity.CurrentWorldId,
+            CurrentDataCenter = renderedProfile.CurrentDataCenter,
+        };
+    }
+
+    private void SetDebugProgress(string text, float progress, bool success)
+    {
+        debugProgressText = text;
+        debugProgress = Math.Clamp(progress, 0f, 1f);
+        debugSuccess = success;
+    }
+
+    private void DrawDebugProgressOverlay()
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+        var pos = ImGui.GetWindowPos();
+        var size = ImGui.GetWindowSize();
+        var min = pos;
+        var max = pos + size;
+
+        drawList.AddRectFilled(min, max, ImGui.GetColorU32(new Vector4(0f, 0f, 0f, 0.70f)), 7f * scale);
+
+        var panelSize = new Vector2(MathF.Min(360f * scale, size.X - 42f * scale), 98f * scale);
+        var panelPos = pos + (size - panelSize) * 0.5f;
+        drawList.AddRectFilled(panelPos, panelPos + panelSize, ImGui.GetColorU32(UiColors.WithAlpha(UiColors.Get("PrivatePopupBg"), 0.97f)), 8f * scale);
+        drawList.AddRect(panelPos, panelPos + panelSize, ImGui.GetColorU32(UiColors.WithAlpha(config.AccentColor, 0.65f)), 8f * scale, ImDrawFlags.None, 1.2f * scale);
+
+        var textColor = debugSuccess ? new Vector4(0.35f, 1f, 0.55f, 1f) : UiColors.Text;
+        var text = string.IsNullOrWhiteSpace(debugProgressText) ? "Working..." : debugProgressText;
+        var textSize = ImGui.CalcTextSize(text);
+        var textPos = panelPos + new Vector2((panelSize.X - textSize.X) * 0.5f, 22f * scale);
+        drawList.AddText(textPos, ImGui.GetColorU32(textColor), text);
+
+        var barPos = panelPos + new Vector2(24f, 58f) * scale;
+        var barSize = new Vector2(panelSize.X - 48f * scale, 12f * scale);
+        drawList.AddRectFilled(barPos, barPos + barSize, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.10f)), 8f * scale);
+        drawList.AddRectFilled(barPos, barPos + new Vector2(barSize.X * Math.Clamp(debugProgress, 0f, 1f), barSize.Y), ImGui.GetColorU32(debugSuccess ? new Vector4(0.35f, 1f, 0.55f, 0.95f) : config.AccentColor), 8f * scale);
+
+        ImGui.SetCursorScreenPos(min);
+        ImGui.InvisibleButton("##my-profile-debug-modal-blocker", size);
+    }
+
+    private void DrawDebugReportWindow()
+    {
+        if (!debugWindowOpen)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var pushed = 0;
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, config.WindowBackgroundColor); pushed++;
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, UiColors.WithAlpha(UiColors.Get("PrivateFrameBg"), 0.42f)); pushed++;
+        ImGui.SetNextWindowSize(new Vector2(560f, 560f) * scale, ImGuiCond.FirstUseEver);
+        if (!ImGui.Begin(debugReportTitle + "###PrivacyMyProfileSyncDebug", ref debugWindowOpen, ImGuiWindowFlags.NoDocking))
+        {
+            ImGui.PopStyleColor(pushed);
+            ImGui.End();
+            return;
+        }
+
+        WindowEdgeFade.DrawUnified(config.WindowBackgroundColor, config.AccentColor);
+        var drawList = ImGui.GetWindowDrawList();
+        var headerPos = ImGui.GetCursorScreenPos();
+        var width = ImGui.GetContentRegionAvail().X;
+        var headerHeight = 58f * scale;
+        HeaderDecor.Draw(drawList, headerPos, width, headerHeight, config.WindowBackgroundColor, config.AccentColor);
+        DrawTextWithShadow(drawList, headerPos + new Vector2(20f, 13f) * scale, ImGui.GetColorU32(config.AccentColor), debugReportTitle, 20f * scale);
+        ImGui.Dummy(new Vector2(width, headerHeight));
+
+        using (ImRaii.Child("my-debug-report-shell", new Vector2(-1f, -1f), false))
+        {
+            var bodyPos = ImGui.GetCursorScreenPos();
+            var bodySize = ImGui.GetContentRegionAvail();
+            HeaderDecor.DrawBackgroundOverlay(drawList, bodyPos, bodySize, config.WindowBackgroundColor, config.AccentColor);
+
+            ImGui.TextWrapped("This compares the latest cloud payload against the values currently rendered by this profile preview.");
+            ThemedWidgets.FadeSeparator(config.AccentColor);
+            using (ImRaii.Child("my-debug-report-body", new Vector2(-1f, -38f * scale), true))
+            {
+                ImGui.TextUnformatted(debugReport);
+            }
+
+            if (ThemedWidgets.Button("Copy report", new Vector2(112f, 0f) * scale, config.AccentColor))
+                ImGui.SetClipboardText(debugReport);
+            ImGui.SameLine();
+            if (ThemedWidgets.Button("Close", new Vector2(82f, 0f) * scale, config.AccentColor))
+                debugWindowOpen = false;
+        }
+
+        ImGui.End();
+        ImGui.PopStyleColor(pushed);
+    }
+
+    private ProfileDebugSnapshot BuildRenderedDebugSnapshot(PrivateContact profile)
+    {
+        var locationInfo = BuildPreviewLocationDebugInfo(profile);
+        return new ProfileDebugSnapshot
+        {
+            Theme = ProfileVisuals.NormalizeThemeName(profile.CloudThemeName),
+            ThemeColor = NormalizeHex(profile.CloudThemeColorHex, "#2BE5B5"),
+            DisplayNameEffect = ProfileNameEffects.Normalize(profile.CloudDisplayNameEffect),
+            BannerImage = profile.CloudBannerUrl ?? string.Empty,
+            AvatarBorder = NormalizeHex(profile.CloudAvatarBorderColorHex, "#2BE5B5"),
+            StatusColor = NormalizeHex(profile.CloudStatusColorHex, "#2BE5B5"),
+            ThemeSymbols = BuildDebugThemeSymbols(profile.CloudThemeName),
+            Location = profile.DisplayLocation,
+            VenueMatch = locationInfo.VenueMatch,
+            VenueMatchAccepted = locationInfo.VenueMatchAccepted,
+            HousingType = locationInfo.HousingType,
+            VenueLookupAllowed = locationInfo.VenueLookupAllowed,
+        };
+    }
+
+    private ProfileDebugSnapshot BuildCloudDebugSnapshot(CloudProfileSnapshot? profile)
+    {
+        if (profile == null)
+            return new ProfileDebugSnapshot();
+
+        var temp = new PrivateContact
+        {
+            Name = profile.CharacterName,
+            World = profile.HomeWorld,
+            WorldId = profile.HomeWorldId,
+            ContentId = profile.ContentId,
+            CurrentWorld = profile.CurrentWorld,
+            CurrentWorldId = profile.CurrentWorldId,
+            CurrentDataCenter = profile.CurrentDataCenter,
+            LastKnownZone = profile.CurrentZone,
+            ResidentialDetails = profile.ResidentialDetails,
+            Status = profile.Status,
+            CloudThemeName = profile.ThemeName,
+            CloudThemeColorHex = profile.ThemeColorHex,
+            CloudDisplayNameEffect = profile.DisplayNameEffect,
+            CloudBannerUrl = profile.BannerUrl,
+            CloudAvatarBorderColorHex = profile.AvatarBorderColorHex,
+            CloudStatusColorHex = profile.StatusColorHex,
+        };
+
+        var locationInfo = BuildPreviewLocationDebugInfo(temp);
+        return new ProfileDebugSnapshot
+        {
+            Theme = profile.ThemeName ?? string.Empty,
+            ThemeColor = NormalizeHexOrEmpty(profile.ThemeColorHex),
+            DisplayNameEffect = profile.DisplayNameEffect ?? string.Empty,
+            BannerImage = profile.BannerUrl ?? string.Empty,
+            AvatarBorder = NormalizeHexOrEmpty(profile.AvatarBorderColorHex),
+            StatusColor = NormalizeHexOrEmpty(profile.StatusColorHex),
+            ThemeSymbols = string.IsNullOrWhiteSpace(profile.ThemeName) ? string.Empty : BuildDebugThemeSymbols(profile.ThemeName),
+            Location = temp.DisplayLocation,
+            VenueMatch = locationInfo.VenueMatch,
+            VenueMatchAccepted = locationInfo.VenueMatchAccepted,
+            HousingType = locationInfo.HousingType,
+            VenueLookupAllowed = locationInfo.VenueLookupAllowed,
+        };
+    }
+
+    private string BuildSelfDebugReport(CloudProfileSnapshot? cloud, ProfileDebugSnapshot rendered)
+    {
+        var cloudSnapshot = BuildCloudDebugSnapshot(cloud);
+        var cloudHash = BuildProfileDebugHash(cloudSnapshot);
+        var renderedHash = BuildProfileDebugHash(rendered);
+        var match = string.Equals(cloudHash, renderedHash, StringComparison.Ordinal);
+
+        var sb = new StringBuilder();
+        sb.AppendLine("Cloud returned:");
+        sb.AppendLine();
+        sb.AppendLine($"Theme: {ValueOrNone(cloudSnapshot.Theme)}");
+        sb.AppendLine($"Theme Color: {ValueOrNone(cloudSnapshot.ThemeColor)}");
+        sb.AppendLine($"Display Name Effect: {ValueOrNone(cloudSnapshot.DisplayNameEffect)}");
+        sb.AppendLine($"Banner Image: {ValueOrNone(cloudSnapshot.BannerImage)}");
+        sb.AppendLine($"Avatar Border: {ValueOrNone(cloudSnapshot.AvatarBorder)}");
+        sb.AppendLine($"Status Color: {ValueOrNone(cloudSnapshot.StatusColor)}");
+        sb.AppendLine($"Theme Symbols: {ValueOrNone(cloudSnapshot.ThemeSymbols)}");
+        sb.AppendLine();
+        sb.AppendLine($"Cloud Location: {ValueOrNone(cloudSnapshot.Location)}");
+        sb.AppendLine($"Venue match: {ValueOrNone(cloudSnapshot.VenueMatch)}");
+        sb.AppendLine($"Venue match accepted: {YesNo(cloudSnapshot.VenueMatchAccepted)}");
+        sb.AppendLine($"Housing type: {ValueOrNone(cloudSnapshot.HousingType)}");
+        sb.AppendLine($"Venue lookup allowed: {YesNo(cloudSnapshot.VenueLookupAllowed)}");
+        sb.AppendLine();
+        sb.AppendLine("Currently rendered by plugin:");
+        sb.AppendLine();
+        sb.AppendLine($"Theme: {ValueOrNone(rendered.Theme)}");
+        sb.AppendLine($"Theme Color: {ValueOrNone(rendered.ThemeColor)}");
+        sb.AppendLine($"Display Name Effect: {ValueOrNone(rendered.DisplayNameEffect)}");
+        sb.AppendLine($"Banner Image: {ValueOrNone(rendered.BannerImage)}");
+        sb.AppendLine($"Avatar Border: {ValueOrNone(rendered.AvatarBorder)}");
+        sb.AppendLine($"Status Color: {ValueOrNone(rendered.StatusColor)}");
+        sb.AppendLine($"Theme Symbols: {ValueOrNone(rendered.ThemeSymbols)}");
+        sb.AppendLine();
+        sb.AppendLine($"Plugin Location: {ValueOrNone(rendered.Location)}");
+        sb.AppendLine($"Venue match: {ValueOrNone(rendered.VenueMatch)}");
+        sb.AppendLine($"Venue match accepted: {YesNo(rendered.VenueMatchAccepted)}");
+        sb.AppendLine($"Housing type: {ValueOrNone(rendered.HousingType)}");
+        sb.AppendLine($"Venue lookup allowed: {YesNo(rendered.VenueLookupAllowed)}");
+        sb.AppendLine();
+        sb.AppendLine($"Cloud hash: {cloudHash}");
+        sb.AppendLine($"Rendered hash: {renderedHash}");
+        sb.AppendLine($"Match: {YesNo(match)}");
+
+        if (cloud == null)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Cloud lookup returned no profile for this character.");
+        }
+
+        return sb.ToString();
+    }
+
+    private LocationDebugInfo BuildPreviewLocationDebugInfo(PrivateContact profile)
+    {
+        var housingType = ResolvePreviewHousingType(profile);
+        var venueLookupAllowed = !string.Equals(housingType, "Apartment", StringComparison.OrdinalIgnoreCase) &&
+                                 !string.Equals(housingType, "Unknown", StringComparison.OrdinalIgnoreCase);
+        var venueMatch = venueLookupAllowed ? ResolvePreviewVenueName(profile) : string.Empty;
+        return new LocationDebugInfo
+        {
+            HousingType = housingType,
+            VenueLookupAllowed = venueLookupAllowed,
+            VenueMatch = venueMatch,
+            VenueMatchAccepted = venueLookupAllowed && !string.IsNullOrWhiteSpace(venueMatch),
+        };
+    }
+
+    private static string ResolvePreviewHousingType(PrivateContact profile)
+    {
+        var text = $"{profile.LastKnownZone} {profile.ResidentialDetails}";
+        if (text.Contains("Apartment", StringComparison.OrdinalIgnoreCase)) return "Apartment";
+        if (text.Contains("Private Mansion", StringComparison.OrdinalIgnoreCase)) return "Private Mansion";
+        if (text.Contains("Private House", StringComparison.OrdinalIgnoreCase)) return "Private House";
+        if (text.Contains("Private Cottage", StringComparison.OrdinalIgnoreCase)) return "Private Cottage";
+        if (text.Contains("Mist", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("Lavender", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("Lavander", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("Goblet", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("Shirogane", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("Empyreum", StringComparison.OrdinalIgnoreCase)) return "Residential Plot";
+        return "Unknown";
+    }
+
+    private static string BuildDebugThemeSymbols(string themeName)
+        => string.Join(" ",
+            FormatDebugIconCode(ProfileVisuals.GetSectionIcon(themeName, "Status")),
+            FormatDebugIconCode(ProfileVisuals.GetSectionIcon(themeName, "Bio")),
+            FormatDebugIconCode(ProfileVisuals.GetSectionIcon(themeName, "Location")));
+
+    private static string FormatDebugIconCode(string icon)
+    {
+        if (string.IsNullOrEmpty(icon))
+            return string.Empty;
+        var rune = char.ConvertToUtf32(icon, 0);
+        return "0x" + rune.ToString("X");
+    }
+
+    private static string BuildProfileDebugHash(ProfileDebugSnapshot snapshot)
+    {
+        var raw = string.Join("|", new[]
+        {
+            snapshot.Theme,
+            snapshot.ThemeColor,
+            snapshot.DisplayNameEffect,
+            snapshot.BannerImage,
+            snapshot.AvatarBorder,
+            snapshot.StatusColor,
+            snapshot.ThemeSymbols,
+            snapshot.Location,
+            snapshot.VenueMatch,
+            snapshot.VenueMatchAccepted ? "1" : "0",
+            snapshot.HousingType,
+            snapshot.VenueLookupAllowed ? "1" : "0",
+        }.Select(value => value?.Trim() ?? string.Empty));
+
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
+        return Convert.ToHexString(bytes)[..12];
+    }
+
+    private static string ValueOrNone(string value)
+        => string.IsNullOrWhiteSpace(value) ? "None" : value.Trim();
+
+    private static string YesNo(bool value)
+        => value ? "yes" : "no";
+
+    private static string NormalizeHexOrEmpty(string value)
+        => string.IsNullOrWhiteSpace(value) ? string.Empty : NormalizeHex(value, string.Empty);
+
+    private sealed class ProfileDebugSnapshot
+    {
+        public string Theme { get; set; } = string.Empty;
+        public string ThemeColor { get; set; } = string.Empty;
+        public string DisplayNameEffect { get; set; } = string.Empty;
+        public string BannerImage { get; set; } = string.Empty;
+        public string AvatarBorder { get; set; } = string.Empty;
+        public string StatusColor { get; set; } = string.Empty;
+        public string ThemeSymbols { get; set; } = string.Empty;
+        public string Location { get; set; } = string.Empty;
+        public string VenueMatch { get; set; } = string.Empty;
+        public bool VenueMatchAccepted { get; set; }
+        public string HousingType { get; set; } = string.Empty;
+        public bool VenueLookupAllowed { get; set; }
+    }
+
+    private sealed class LocationDebugInfo
+    {
+        public string VenueMatch { get; set; } = string.Empty;
+        public bool VenueMatchAccepted { get; set; }
+        public string HousingType { get; set; } = string.Empty;
+        public bool VenueLookupAllowed { get; set; }
     }
 
 
@@ -1267,6 +1701,64 @@ internal sealed class MyProfileWindow : Window
             ImGui.SetTooltip("Add venue to carousel");
 
         DrawFavoriteVenueCarousel(config.CloudSavedVenues);
+        DrawEditFavoriteVenueTooltipTagPopup();
+    }
+
+
+    private void DrawEditFavoriteVenueTooltipTagPopup()
+    {
+        if (editingFavoriteVenueTooltipTag == null)
+            return;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowSize(new Vector2(285f, 0f) * scale, ImGuiCond.Always);
+        ImGui.SetNextWindowPos(ImGui.GetMousePos() + new Vector2(10f, 8f) * scale, ImGuiCond.Appearing);
+        if (!ImGui.BeginPopup("edit_favorite_venue_tooltiptag_popup"))
+            return;
+
+        ImGui.TextColored(config.AccentColor, "Edit tooltiptag");
+        ImGui.TextDisabled(editingFavoriteVenueTooltipTag.Name);
+        ThemedWidgets.FadeSeparator(config.AccentColor, 1f, 4f);
+
+        if (!string.IsNullOrWhiteSpace(editingFavoriteVenueTooltipTagError))
+            ImGui.TextColored(new Vector4(1f, 0.42f, 0.40f, 1f), editingFavoriteVenueTooltipTagError);
+
+        ImGui.SetNextItemWidth(170f * scale);
+        using (ImRaii.PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.62f)))
+        using (ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, 1f * scale))
+        if (ImGui.InputTextWithHint("##edit_favorite_tooltiptag", "Tooltip tag", ref editingFavoriteVenueTooltipTagBuffer, 32))
+            editingFavoriteVenueTooltipTagBuffer = SanitizeFavoriteVenueTag(editingFavoriteVenueTooltipTagBuffer);
+
+        ImGui.SameLine();
+        var color = UiColors.HexToRgba(NormalizeHex(editingFavoriteVenueTooltipTagColorHex, "#B56CFF"));
+        if (ImGui.ColorEdit4("##edit_favorite_tooltiptag_color", ref color, ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoLabel | ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.AlphaPreviewHalf))
+            editingFavoriteVenueTooltipTagColorHex = ColorToHex(color);
+
+        ImGui.Spacing();
+        if (ThemedWidgets.Button("Save##edit_favorite_tooltiptag_save", new Vector2(80f, 25f) * scale, config.AccentColor))
+        {
+            var tag = SanitizeFavoriteVenueTag(editingFavoriteVenueTooltipTagBuffer);
+            if (tag.Length > 20)
+            {
+                editingFavoriteVenueTooltipTagError = "Tag must have 20 caracteres or less.";
+            }
+            else
+            {
+                editingFavoriteVenueTooltipTag.TooltipTag = tag;
+                editingFavoriteVenueTooltipTag.TooltipTagColorHex = NormalizeHex(editingFavoriteVenueTooltipTagColorHex, "#B56CFF");
+                config.Save();
+                editingFavoriteVenueTooltipTag = null;
+                ImGui.CloseCurrentPopup();
+            }
+        }
+        ImGui.SameLine();
+        if (ThemedWidgets.Button("Cancel##edit_favorite_tooltiptag_cancel", new Vector2(80f, 25f) * scale, config.AccentColor))
+        {
+            editingFavoriteVenueTooltipTag = null;
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.EndPopup();
     }
 
     private void AddSelectedFavoriteVenue()
@@ -1399,6 +1891,15 @@ internal sealed class MyProfileWindow : Window
             }
             if (allowEditing && ImGui.BeginPopupContextItem($"fav_venue_context_{idSuffix}_{venue.Name}_{i}"))
             {
+                if (ImGui.MenuItem("Edit tooltiptag"))
+                {
+                    editingFavoriteVenueTooltipTag = venue;
+                    editingFavoriteVenueTooltipTagBuffer = SanitizeFavoriteVenueTag(venue.TooltipTag);
+                    editingFavoriteVenueTooltipTagColorHex = NormalizeHex(venue.TooltipTagColorHex, "#B56CFF");
+                    editingFavoriteVenueTooltipTagError = string.Empty;
+                    ImGui.OpenPopup("edit_favorite_venue_tooltiptag_popup");
+                }
+
                 if (ImGui.MenuItem("Remove"))
                 {
                     venues.Remove(venue);
@@ -1663,19 +2164,19 @@ internal sealed class MyProfileWindow : Window
         ImGui.TextUnformatted("District:");
         ImGui.SameLine();
         ImGui.SetNextItemWidth(118f * ImGuiHelpers.GlobalScale);
-        DrawStringCombo("##venue_district", ref selectedDistrict, Districts);
+        DrawStringCombo("##venue_district", ref selectedDistrict, Districts, config.AccentColor);
 
         ImGui.SameLine();
         ImGui.TextUnformatted("Ward:");
         ImGui.SameLine();
         ImGui.SetNextItemWidth(58f * ImGuiHelpers.GlobalScale);
-        DrawNumberCombo("##venue_ward", ref selectedWard, 1, 30);
+        DrawNumberCombo("##venue_ward", ref selectedWard, 1, 30, config.AccentColor);
 
         ImGui.SameLine();
         ImGui.TextUnformatted("Plot:");
         ImGui.SameLine();
         ImGui.SetNextItemWidth(58f * ImGuiHelpers.GlobalScale);
-        DrawNumberCombo("##venue_plot", ref selectedPlot, 1, 60);
+        DrawNumberCombo("##venue_plot", ref selectedPlot, 1, 60, config.AccentColor);
 
         ImGui.SetNextItemWidth(-1f);
         using (ImRaii.PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.62f)))
@@ -1778,7 +2279,7 @@ internal sealed class MyProfileWindow : Window
         if (!worlds.Contains(selectedWorld, StringComparer.OrdinalIgnoreCase))
             selectedWorld = worlds.FirstOrDefault() ?? string.Empty;
 
-        DrawStringCombo("##venue_world", ref selectedWorld, worlds);
+        DrawStringCombo("##venue_world", ref selectedWorld, worlds, config.AccentColor);
     }
 
     private static string[] GetWorldsForDataCenter(string dataCenter)
@@ -1792,9 +2293,9 @@ internal sealed class MyProfileWindow : Window
         return [];
     }
 
-    private static void DrawStringCombo(string id, ref string current, IReadOnlyList<string> values)
+    private static void DrawStringCombo(string id, ref string current, IReadOnlyList<string> values, Vector4 accent)
     {
-        if (!ThemedWidgets.BeginCombo(id, current, UiColors.Accent))
+        if (!ThemedWidgets.BeginCombo(id, current, accent))
             return;
 
         foreach (var value in values)
@@ -1806,9 +2307,9 @@ internal sealed class MyProfileWindow : Window
         ImGui.EndCombo();
     }
 
-    private static void DrawNumberCombo(string id, ref int current, int min, int max)
+    private static void DrawNumberCombo(string id, ref int current, int min, int max, Vector4 accent)
     {
-        if (!ThemedWidgets.BeginCombo(id, current.ToString(), UiColors.Accent))
+        if (!ThemedWidgets.BeginCombo(id, current.ToString(), accent))
             return;
 
         for (var i = min; i <= max; i++)
@@ -1960,17 +2461,10 @@ internal sealed class MyProfileWindow : Window
         {
             var snapshot = GameLocationResolver.GetCurrent(dataManager, clientState);
             residentialDetails = snapshot.ResidentialDetails;
-            var parts = new List<string>();
-            AddPreviewLocationPart(parts, currentDataCenter);
-            AddPreviewLocationPart(parts, currentWorld);
-            AddPreviewLocationPart(parts, snapshot.Zone);
-            return parts.Count == 0 ? "Current location unavailable." : string.Join(", ", parts);
+            return string.IsNullOrWhiteSpace(snapshot.Zone) ? "Current location unavailable." : snapshot.Zone.Trim();
         }
 
-        var fallback = new List<string>();
-        AddPreviewLocationPart(fallback, currentDataCenter);
-        AddPreviewLocationPart(fallback, currentWorld);
-        return fallback.Count == 0 ? "Current location appears after login." : string.Join(", ", fallback);
+        return "Current location appears after login.";
     }
 
     private uint ResolveLocalCurrentWorldId()
