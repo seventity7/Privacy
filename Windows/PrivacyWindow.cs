@@ -21,8 +21,8 @@ namespace Privacy.Windows;
 
 internal sealed class PrivacyWindow : Window, IDisposable
 {
-    private const float CompactUiWidth = 529f;
-    private const float CompactUiHeight = 715f;
+    private const float CompactUiWidth = 485f;
+    private const float CompactUiHeight = 779f;
     private const float InitialFooterHeightEstimate = 0f;
     private const float CompactSidebarRailRounding = 4f;
     private const float CompactSidebarRailBorderThickness = 8f;
@@ -205,12 +205,12 @@ internal sealed class PrivacyWindow : Window, IDisposable
         this.onlineProfileWindow = onlineProfileWindow;
 
         Size = new Vector2(CompactUiWidth, CompactUiHeight);
-        SizeCondition = ImGuiCond.Always;
+        SizeCondition = ImGuiCond.FirstUseEver;
 
         WindowBuilder.For(this)
             .AllowPinning(true)
             .AllowClickthrough(false)
-            .SetSizeConstraints(new Vector2(CompactUiWidth, TopSummaryHeight + 8f), new Vector2(CompactUiWidth, CompactUiHeight))
+            .SetSizeConstraints(new Vector2(430f, TopSummaryHeight + 8f), new Vector2(900f, 1000f))
             .AddFlags(ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
             .Apply();
     }
@@ -221,10 +221,15 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
     public override void PreDraw()
     {
-        Size = config.WindowCollapsed
-            ? new Vector2(CompactUiWidth, (config.HideTopBar ? HeaderHeight : TopSummaryHeight) + 8f)
-            : new Vector2(CompactUiWidth, CompactUiHeight);
-        SizeCondition = ImGuiCond.Always;
+        if (config.WindowCollapsed)
+        {
+            Size = new Vector2(MathF.Max(CompactUiWidth, ImGui.GetWindowSize().X), (config.HideTopBar ? HeaderHeight : TopSummaryHeight) + 8f);
+            SizeCondition = ImGuiCond.Always;
+        }
+        else
+        {
+            SizeCondition = ImGuiCond.FirstUseEver;
+        }
 
         pushedColorCount = 0;
         pushedStyleVarCount = 0;

@@ -364,7 +364,7 @@ internal sealed class SettingsWindow : Window
         ImGui.InvisibleButton("main-window-background-image", previewSize);
 
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Upload an image to be the background. Max size: 577x697");
+            ImGui.SetTooltip("Upload an image to be the background. Max size: 475x692");
 
         if (ImGui.IsItemClicked())
             OpenBackgroundImagePicker();
