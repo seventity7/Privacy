@@ -97,7 +97,7 @@ internal sealed unsafe class EstateTeleportWindow : Window
         PushColor(ImGuiCol.WindowBg, Vector4.Zero);
         PushColor(ImGuiCol.ChildBg, Vector4.Zero);
         PushColor(ImGuiCol.PopupBg, UiColors.Get("PrivatePopupBg"));
-        PushColor(ImGuiCol.Border, Vector4.Zero);
+        PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.55f));
         PushColor(ImGuiCol.FrameBg, UiColors.Get("PrivateFrameBg"));
         PushColor(ImGuiCol.FrameBgHovered, UiColors.Get("PrivateFrameBgHovered"));
         PushColor(ImGuiCol.FrameBgActive, UiColors.Get("PrivateFrameBgActive"));
@@ -117,7 +117,8 @@ internal sealed unsafe class EstateTeleportWindow : Window
         PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(6f, 6f) * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.WindowRounding, 7f * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.ChildRounding, 4f * ImGuiHelpers.GlobalScale);
-        PushStyleVar(ImGuiStyleVar.FrameRounding, 4f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameRounding, 5f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f * ImGuiHelpers.GlobalScale);
     }
 
     public override void PostDraw()
@@ -161,13 +162,13 @@ var drawList = ImGui.GetWindowDrawList();
         ImGui.TextDisabled("This function must use the game's native TeleportHousingFriend addon. The estate rows are loaded by the game after the native friend estate request, so this plugin no longer shows fabricated house entries.");
         ImGui.Spacing();
 
-        if (ImGui.Button("Try native window again", new Vector2(180f, 0f) * scale))
+        if (ThemedWidgets.Button("Try native window again", new Vector2(180f, 0f) * scale, config.AccentColor))
         {
             if (TryOpenNativeEstateTeleport(contact))
                 IsOpen = false;
         }
         ImGui.SameLine();
-        if (ImGui.Button("Close", new Vector2(100f, 0f) * scale))
+        if (ThemedWidgets.Button("Close", new Vector2(100f, 0f) * scale, config.AccentColor))
             IsOpen = false;
     }
 

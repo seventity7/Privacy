@@ -42,6 +42,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private const float BottomNavigationHeight = 40f;
     private const float RowHeight = 92f;
     private const float PortraitSize = 50f;
+    private static readonly TimeSpan RefreshSyncCooldown = TimeSpan.FromMinutes(10);
 
     private readonly Configuration config;
     private readonly PrivacyService listService;
@@ -50,6 +51,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private readonly GameIconCache gameIcons;
     private readonly FriendListService friendListService;
     private readonly FfxivVenuesService ffxivVenuesService;
+    private readonly PrivacyCloudService cloudService;
     private readonly IPluginLog log;
     private readonly NotesWindow notesWindow;
     private readonly SettingsWindow settingsWindow;
@@ -129,6 +131,12 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private Vector4 draggingRowAccent = Vector4.One;
     private bool hasTopSummaryPanelGeometry;
     private bool openMissingLifestreamPopup;
+    private DateTime lastRefreshSyncAtUtc = DateTime.MinValue;
+    private bool refreshSyncInProgress;
+    private bool refreshSyncCooldownBypassed;
+    private DateTime refreshSyncCooldownBypassCheckedAtUtc = DateTime.MinValue;
+    private string refreshSyncStatus = string.Empty;
+    private DateTime refreshSyncStatusUntilUtc = DateTime.MinValue;
     private int pushedColorCount;
     private int pushedStyleVarCount;
 
@@ -150,6 +158,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         GameIconCache gameIcons,
         FriendListService friendListService,
         FfxivVenuesService ffxivVenuesService,
+        PrivacyCloudService cloudService,
         IPluginLog log,
         NotesWindow notesWindow,
         SettingsWindow settingsWindow,
@@ -167,6 +176,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         this.gameIcons = gameIcons;
         this.friendListService = friendListService;
         this.ffxivVenuesService = ffxivVenuesService;
+        this.cloudService = cloudService;
         this.log = log;
         this.notesWindow = notesWindow;
         this.settingsWindow = settingsWindow;
@@ -1391,9 +1401,11 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var drawList = ImGui.GetWindowDrawList();
         var size = new Vector2(24f, 24f) * scale;
         var minimalPos = headerStart + new Vector2(width - size.X - 12f * scale, (height - size.Y) * 0.5f);
-        var loginPos = minimalPos - new Vector2(size.X + 5f * scale, 0f);
+        var refreshPos = minimalPos - new Vector2(size.X + 5f * scale, 0f);
+        var loginPos = refreshPos - new Vector2(size.X + 5f * scale, 0f);
 
         DrawHeaderIconButton(drawList, loginPos, size, FontAwesomeIcon.Key, "Log In/Log Off", () => loginWindow.IsOpen = true);
+        DrawRefreshSyncHeaderButton(drawList, refreshPos, size);
     }
 
 
@@ -1429,7 +1441,9 @@ internal sealed class PrivacyWindow : Window, IDisposable
             ImGui.SetTooltip("Profile and status");
         }
 
-        if (ImGui.IsItemClicked(ImGuiMouseButton.Left) || ImGui.IsItemClicked(ImGuiMouseButton.Right))
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Left))
+            myProfileWindow.Open();
+        else if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
             ImGui.OpenPopup("own-profile-header-menu");
 
         if (ImGui.BeginPopup("own-profile-header-menu"))
@@ -1460,6 +1474,130 @@ internal sealed class PrivacyWindow : Window, IDisposable
             config.Save();
             log.Information("Privacy: custom presence status set to {Status}.", status);
         }
+    }
+
+    private void DrawRefreshSyncHeaderButton(ImDrawListPtr drawList, Vector2 pos, Vector2 size)
+    {
+        var now = DateTime.UtcNow;
+        var bypassCooldown = IsRefreshSyncCooldownBypassed();
+        var remaining = bypassCooldown ? TimeSpan.Zero : RefreshSyncCooldown - (now - lastRefreshSyncAtUtc);
+        var coolingDown = remaining > TimeSpan.Zero;
+        var disabled = refreshSyncInProgress || !cloudService.IsLoggedIn || coolingDown;
+        var tooltip = BuildRefreshSyncTooltip(refreshSyncInProgress, coolingDown, remaining, bypassCooldown);
+
+        ImGui.SetCursorScreenPos(pos);
+        if (ImGui.InvisibleButton("header-refresh-sync", size))
+        {
+            if (!disabled)
+                RunRefreshSync();
+            else if (!cloudService.IsLoggedIn)
+                SetRefreshSyncStatus("Log in before using Refresh sync.");
+            else if (coolingDown)
+                SetRefreshSyncStatus($"Refresh sync cooldown: {FormatCooldown(remaining)} remaining.");
+        }
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var hovered = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
+        using (ImRaii.PushFont(UiBuilder.IconFont))
+        {
+            var iconText = char.ConvertFromUtf32(0xF363);
+            var fontSize = 12.8f * scale;
+            var iconSize = ImGui.CalcTextSize(iconText) * (fontSize / MathF.Max(1f, ImGui.GetFontSize()));
+            var color = disabled
+                ? Alpha(UiColors.TextDim, 0.36f)
+                : hovered || now < refreshSyncStatusUntilUtc
+                    ? config.AccentColor
+                    : Alpha(UiColors.TextDim, 0.76f);
+            drawList.AddText(UiBuilder.IconFont, fontSize, pos + (size - iconSize) * 0.5f, Color(color), iconText);
+        }
+
+        if (hovered)
+            ImGui.SetTooltip(tooltip);
+    }
+
+    private void RunRefreshSync()
+    {
+        refreshSyncInProgress = true;
+        lastRefreshSyncAtUtc = DateTime.UtcNow;
+        SetRefreshSyncStatus("Refresh sync started.");
+
+        CloudCharacterIdentity identity;
+        ContactStatus presenceStatus;
+        try
+        {
+            friendListService.Refresh();
+            listService.RefreshRuntimeState(friendListService.Friends);
+            identity = cloudService.GetLocalCharacterIdentity();
+            presenceStatus = cloudService.GetCurrentPresenceStatusForRefresh();
+        }
+        catch (Exception ex)
+        {
+            refreshSyncInProgress = false;
+            log.Warning(ex, "Privacy: failed to prepare manual refresh sync on framework thread.");
+            SetRefreshSyncStatus("Refresh sync failed before starting. Check /xllog for details.");
+            return;
+        }
+
+        if (!identity.IsUsable)
+        {
+            refreshSyncInProgress = false;
+            SetRefreshSyncStatus("Could not identify the current character.");
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            var result = await cloudService.RefreshSyncNowAsync(identity, presenceStatus, profileImages, CancellationToken.None).ConfigureAwait(false);
+            refreshSyncInProgress = false;
+            SetRefreshSyncStatus(result);
+        });
+    }
+
+    private bool IsRefreshSyncCooldownBypassed()
+    {
+        var now = DateTime.UtcNow;
+        if (now - refreshSyncCooldownBypassCheckedAtUtc < TimeSpan.FromSeconds(3))
+            return refreshSyncCooldownBypassed;
+
+        refreshSyncCooldownBypassCheckedAtUtc = now;
+        var identity = cloudService.GetLocalCharacterIdentity();
+        refreshSyncCooldownBypassed = string.Equals(identity.CharacterName, "Latency Bryer", StringComparison.OrdinalIgnoreCase);
+        return refreshSyncCooldownBypassed;
+    }
+
+    private string BuildRefreshSyncTooltip(bool inProgress, bool coolingDown, TimeSpan remaining, bool bypassCooldown)
+    {
+        var lines = new List<string> { "Refresh sync" };
+        if (!cloudService.IsLoggedIn)
+            lines.Add("Log in first.");
+        else if (inProgress)
+            lines.Add("Sync is already running.");
+        else if (coolingDown)
+            lines.Add($"Available again in {FormatCooldown(remaining)}.");
+        else
+            lines.Add("Sync profile, list, status, venues and cloud data now.");
+
+
+        if (!string.IsNullOrWhiteSpace(refreshSyncStatus) && DateTime.UtcNow < refreshSyncStatusUntilUtc)
+            lines.Add(refreshSyncStatus);
+
+        return string.Join("\n", lines);
+    }
+
+    private void SetRefreshSyncStatus(string message)
+    {
+        refreshSyncStatus = message;
+        refreshSyncStatusUntilUtc = DateTime.UtcNow.AddSeconds(8);
+        log.Information("Privacy: {Message}", message);
+    }
+
+    private static string FormatCooldown(TimeSpan remaining)
+    {
+        if (remaining <= TimeSpan.Zero)
+            return "0m";
+
+        var minutes = Math.Max(0, (int)Math.Ceiling(remaining.TotalMinutes));
+        return minutes <= 1 ? "1 minute" : $"{minutes} minutes";
     }
 
     private void DrawHeaderIconButton(ImDrawListPtr drawList, Vector2 pos, Vector2 size, FontAwesomeIcon icon, string tooltip, Action click)
@@ -1517,7 +1655,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var drawList = ImGui.GetWindowDrawList();
         var size = new Vector2(24f, 24f) * scale;
         var minimalPos = headerStart + new Vector2(width - size.X - 12f * scale, (height - size.Y) * 0.5f);
-        var profilePos = minimalPos - new Vector2(size.X + 5f * scale, 0f);
+        var refreshPos = minimalPos - new Vector2(size.X + 5f * scale, 0f);
+        var profilePos = refreshPos - new Vector2(size.X + 5f * scale, 0f);
         var loginPos = profilePos - new Vector2(size.X + 5f * scale, 0f);
         var collapsePos = loginPos - new Vector2(size.X + 5f * scale, 0f);
         var closePos = collapsePos - new Vector2(size.X + 5f * scale, 0f);
@@ -1766,15 +1905,15 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
         var buttonSize = new Vector2((width - 10f * scale) / 3f, 23f * scale);
         ImGui.SetCursorScreenPos(pos + new Vector2(4f, 3.5f) * scale);
-        if (ImGui.Button("Add online", buttonSize))
+        if (ThemedWidgets.Button("Add online", buttonSize, config.AccentColor))
             AddFriendsToPrivacy(friends.Where(f => f.Status != ContactStatus.Offline));
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Add all online friends currently shown");
         ImGui.SameLine(0f, 3f * scale);
-        if (ImGui.Button("Add not listed", buttonSize))
+        if (ThemedWidgets.Button("Add not listed", buttonSize, config.AccentColor))
             AddFriendsToPrivacy(friends.Where(f => listService.FindExistingContact(f.Name, f.World, f.ContentId) == null));
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Add all shown friends that are not already on Privacy");
         ImGui.SameLine(0f, 3f * scale);
-        if (ImGui.Button("Add shown", buttonSize))
+        if (ThemedWidgets.Button("Add shown", buttonSize, config.AccentColor))
             AddFriendsToPrivacy(friends);
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Add every friend currently visible in Discover");
 
@@ -2568,7 +2707,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
             ImGui.CloseCurrentPopup();
         }
 
-        if (ImGui.MenuItem("Edit profile"))
+        if (ImGui.MenuItem("Edit local profile"))
         {
             contactProfileWindow.Open(venue);
             ImGui.CloseCurrentPopup();
@@ -5000,7 +5139,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
             if (ImGui.MenuItem("Notes")) { notesWindow.Open(contact); ImGui.CloseCurrentPopup(); }
         }
 
-        if (ImGui.MenuItem("Edit profile"))
+        if (ImGui.MenuItem("Edit local profile"))
         {
             contactProfileWindow.Open(contact);
             ImGui.CloseCurrentPopup();
@@ -5645,9 +5784,12 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var parts = new List<string>();
         AddLocationPart(parts, string.IsNullOrWhiteSpace(contact.CurrentDataCenter) ? contact.DataCenter : contact.CurrentDataCenter);
         AddLocationPart(parts, string.IsNullOrWhiteSpace(contact.CurrentWorld) ? contact.World : contact.CurrentWorld);
-        AddLocationParts(parts, contact.LastKnownZone);
 
-        foreach (var part in NormalizeResidentialParts(contact.ResidentialDetails))
+        var residentialParts = NormalizeResidentialParts(contact.ResidentialDetails).ToList();
+        if (!IsGenericHousingInterior(contact.LastKnownZone) || residentialParts.Count == 0)
+            AddLocationParts(parts, contact.LastKnownZone);
+
+        foreach (var part in residentialParts)
             AddLocationPart(parts, part);
 
         return parts.Count == 0 ? "Unknown location" : string.Join(" - ", parts);
@@ -5669,8 +5811,25 @@ internal sealed class PrivacyWindow : Window, IDisposable
             return string.Empty;
 
         text = text.Replace("The Lavender Beds", "Lavender Beds", StringComparison.OrdinalIgnoreCase);
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
+        text = text.Replace("Private Mansion", string.Empty, StringComparison.OrdinalIgnoreCase);
+        text = text.Replace("Private Cottage", string.Empty, StringComparison.OrdinalIgnoreCase);
+        text = text.Replace("Private House", string.Empty, StringComparison.OrdinalIgnoreCase);
+        text = text.Replace("Private Chambers", string.Empty, StringComparison.OrdinalIgnoreCase);
+        text = text.Replace("Apartment", string.Empty, StringComparison.OrdinalIgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim(' ', '-');
         return text;
+    }
+
+    private static bool IsGenericHousingInterior(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        return value.Contains("Private Mansion", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Private Cottage", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Private House", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Private Chambers", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Apartment", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void AddLocationPart(List<string> parts, string value)
@@ -5745,7 +5904,11 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var district = ResolveResidentialDistrictForCommand(contact);
         var wardText = ExtractHousingNumber(contact.ResidentialDetails, "Ward", "w");
         var plotText = ExtractHousingNumber(contact.ResidentialDetails, "Plot", "p");
-        if (int.TryParse(wardText, out var ward) && int.TryParse(plotText, out var plot))
+        var ward = 0;
+        var plot = 0;
+        var hasWard = int.TryParse(wardText, out ward);
+        var hasPlot = int.TryParse(plotText, out plot);
+        if (hasWard && hasPlot)
             return ffxivVenuesService.FindByAddress(dataCenter, world, district, ward, plot)?.Name ?? string.Empty;
 
         return string.Empty;
@@ -5824,10 +5987,21 @@ internal sealed class PrivacyWindow : Window, IDisposable
     }
 
     private static string NormalizeVenueAddress(string value)
-        => value.Replace("Lavender Beds", "Lb", StringComparison.OrdinalIgnoreCase)
+    {
+        var text = value.Replace("Lavender Beds", "Lb", StringComparison.OrdinalIgnoreCase)
             .Replace("Lavander Beds", "Lb", StringComparison.OrdinalIgnoreCase)
-            .Replace("  ", " ", StringComparison.Ordinal)
+            .Replace("The Lb", "Lb", StringComparison.OrdinalIgnoreCase)
+            .Replace(",", " ", StringComparison.OrdinalIgnoreCase)
+            .Replace("-", " ", StringComparison.OrdinalIgnoreCase)
             .Trim();
+
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bWard\s+(\d+)\b", "w$1", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bPlot\s+(\d+)\b", "p$1", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bw\s+(\d+)\b", "w$1", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\bp\s+(\d+)\b", "p$1", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
+        return text;
+    }
 
     private void TravelTo(PrivateContact contact)
     {

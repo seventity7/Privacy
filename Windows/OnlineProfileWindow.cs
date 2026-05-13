@@ -68,7 +68,7 @@ internal sealed class OnlineProfileWindow : Window
         PushColor(ImGuiCol.WindowBg, Vector4.Zero);
         PushColor(ImGuiCol.ChildBg, Vector4.Zero);
         PushColor(ImGuiCol.PopupBg, UiColors.Get("PrivatePopupBg"));
-        PushColor(ImGuiCol.Border, Vector4.Zero);
+        PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.55f));
         PushColor(ImGuiCol.FrameBg, UiColors.Get("PrivateFrameBg"));
         PushColor(ImGuiCol.FrameBgHovered, UiColors.Get("PrivateFrameBgHovered"));
         PushColor(ImGuiCol.FrameBgActive, UiColors.Get("PrivateFrameBgActive"));
@@ -91,7 +91,8 @@ internal sealed class OnlineProfileWindow : Window
         PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(6f, 6f) * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.WindowRounding, 7f * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.ChildRounding, 4f * ImGuiHelpers.GlobalScale);
-        PushStyleVar(ImGuiStyleVar.FrameRounding, 4f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameRounding, 5f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f * ImGuiHelpers.GlobalScale);
     }
 
     public override void PostDraw()
@@ -297,7 +298,11 @@ internal sealed class OnlineProfileWindow : Window
         var district = ResolveResidentialDistrict(profile);
         var wardText = ExtractHousingNumber(profile.ResidentialDetails, "Ward", "w");
         var plotText = ExtractHousingNumber(profile.ResidentialDetails, "Plot", "p");
-        if (int.TryParse(wardText, out var ward) && int.TryParse(plotText, out var plot))
+        var ward = 0;
+        var plot = 0;
+        var hasWard = int.TryParse(wardText, out ward);
+        var hasPlot = int.TryParse(plotText, out plot);
+        if (hasWard && hasPlot)
             return ffxivVenuesService.FindByAddress(dataCenter, world, district, ward, plot)?.Name ?? string.Empty;
 
         return string.Empty;

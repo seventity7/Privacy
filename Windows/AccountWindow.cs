@@ -31,7 +31,7 @@ internal sealed class AccountWindow : Window
         ImGui.TextWrapped("Account login was moved to the Log In/Log Off window.");
         using (ImRaii.PushColor(ImGuiCol.ButtonHovered, UiColors.Get("LightlessPurpleHover")))
         {
-            if (ImGui.Button("Open Log In/Log Off", new Vector2(160f, 0f) * ImGuiHelpers.GlobalScale))
+            if (ThemedWidgets.Button("Open Log In/Log Off", new Vector2(160f, 0f) * ImGuiHelpers.GlobalScale, UiColors.Accent))
             {
                 loginWindow.IsOpen = true;
                 IsOpen = false;

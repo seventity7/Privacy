@@ -2,7 +2,7 @@
   <PropertyGroup>
     <Authors>Bryer</Authors>
     <Company>Bryer</Company>
-    <Version>1.0.2.7</Version>
+    <Version>1.0.2.8</Version>
     <Description>Private contact list for FFXIV.</Description>
     <AssemblyName>Privacy</AssemblyName>
     <TargetFramework>net10.0-windows7.0</TargetFramework>

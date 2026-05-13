@@ -18,6 +18,7 @@ internal static unsafe class GameLocationResolver
         var residentialDistrict = string.Empty;
         var residentialDetails = string.Empty;
         var zone = territoryName;
+        var subdivision = false;
 
         if (housingManager != null)
         {
@@ -44,6 +45,7 @@ internal static unsafe class GameLocationResolver
             var plot = housingManager->GetCurrentPlot();
             var room = housingManager->GetCurrentRoom();
             var division = housingManager->GetCurrentDivision();
+            subdivision = division == 2;
             var hasResidentialContext = housingManager->CurrentTerritory is not null || IsKnownResidentialDistrict(zone);
 
             if (ward > 0 && hasResidentialContext)
@@ -65,6 +67,7 @@ internal static unsafe class GameLocationResolver
             Ward = ExtractNumber(residentialDetails, 'w'),
             Plot = ExtractNumber(residentialDetails, 'p'),
             Room = ExtractRoom(residentialDetails),
+            Subdivision = subdivision,
             IsResidential = isResidential,
         };
     }
