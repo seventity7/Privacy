@@ -27,6 +27,7 @@ internal sealed class PrivacyCloudService : IDisposable
     private const int PresenceChangedHeartbeatSeconds = 1;
     private const int CloudManagedProfileResolveSeconds = 60;
     private const int UnresolvedProfileResolveSeconds = 120;
+    private const string DefaultRepoJsonUrl = "https://raw.githubusercontent.com/seventity7/Privacy/main/repo.json";
 
     private static JsonSerializerOptions CreateJsonOptions()
     {
@@ -487,7 +488,16 @@ internal sealed class PrivacyCloudService : IDisposable
         await SendHeartbeatAsync(identity, presenceStatus, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task SendHeartbeatAsync(CloudCharacterIdentity identity, ContactStatus presenceStatus, CancellationToken cancellationToken = default)
+
+    public async Task NotifyPluginUpdateAvailableAsync(CloudCharacterIdentity identity, ContactStatus presenceStatus, string latestPluginVersion, CancellationToken cancellationToken = default)
+    {
+        if (!config.CloudEnabled || !HasApiBaseUrl || !IsLoggedIn || !identity.IsUsable)
+            return;
+
+        await SendHeartbeatAsync(identity, presenceStatus, cancellationToken, latestPluginVersion).ConfigureAwait(false);
+    }
+
+    private async Task SendHeartbeatAsync(CloudCharacterIdentity identity, ContactStatus presenceStatus, CancellationToken cancellationToken = default, string? detectedLatestPluginVersion = null)
     {
         if (!identity.IsUsable)
             return;
@@ -497,6 +507,8 @@ internal sealed class PrivacyCloudService : IDisposable
             character = identity,
             pluginVersion = CurrentPluginVersion,
             plugin_version = CurrentPluginVersion,
+            detectedLatestPluginVersion = string.IsNullOrWhiteSpace(detectedLatestPluginVersion) ? null : detectedLatestPluginVersion,
+            detected_latest_plugin_version = string.IsNullOrWhiteSpace(detectedLatestPluginVersion) ? null : detectedLatestPluginVersion,
             status = NormalizePresenceStatus(presenceStatus),
             timestamp = DateTimeOffset.UtcNow,
             profile = new
@@ -1007,6 +1019,14 @@ internal sealed class PrivacyCloudService : IDisposable
 
     private async Task<string> FetchLatestPluginVersionAsync(CancellationToken cancellationToken)
     {
+        var workerVersion = await FetchLatestPluginVersionFromWorkerAsync(cancellationToken).ConfigureAwait(false);
+        var repoVersion = await FetchLatestPluginVersionFromRepoJsonAsync(cancellationToken).ConfigureAwait(false);
+
+        return PickNewestVersion(workerVersion, repoVersion);
+    }
+
+    private async Task<string> FetchLatestPluginVersionFromWorkerAsync(CancellationToken cancellationToken)
+    {
         if (!TryGetApiBaseUri(out var apiBase))
             return string.Empty;
 
@@ -1028,6 +1048,84 @@ internal sealed class PrivacyCloudService : IDisposable
         {
             return string.Empty;
         }
+    }
+
+    private async Task<string> FetchLatestPluginVersionFromRepoJsonAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, DefaultRepoJsonUrl);
+            using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+                return string.Empty;
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return TryReadRepoAssemblyVersion(document.RootElement, out var version) ? version : string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static bool TryReadRepoAssemblyVersion(JsonElement root, out string version)
+    {
+        version = string.Empty;
+
+        if (root.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var entry in root.EnumerateArray())
+            {
+                if (TryReadRepoAssemblyVersion(entry, out version))
+                    return true;
+            }
+
+            return false;
+        }
+
+        if (root.ValueKind != JsonValueKind.Object)
+            return false;
+
+        if (root.TryGetProperty("Plugins", out var plugins) && TryReadRepoAssemblyVersion(plugins, out version))
+            return true;
+
+        var name = ReadJsonString(root, "InternalName");
+        if (string.IsNullOrWhiteSpace(name))
+            name = ReadJsonString(root, "Name");
+
+        if (!string.Equals(name, "Privacy", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        version = ReadJsonString(root, "AssemblyVersion");
+        return !string.IsNullOrWhiteSpace(version);
+    }
+
+    private static string ReadJsonString(JsonElement element, string propertyName)
+    {
+        foreach (var property in element.EnumerateObject())
+        {
+            if (string.Equals(property.Name, propertyName, StringComparison.OrdinalIgnoreCase) && property.Value.ValueKind == JsonValueKind.String)
+                return property.Value.GetString() ?? string.Empty;
+        }
+
+        return string.Empty;
+    }
+
+    private static string PickNewestVersion(params string[] versions)
+    {
+        var newest = string.Empty;
+
+        foreach (var version in versions)
+        {
+            if (string.IsNullOrWhiteSpace(version))
+                continue;
+
+            if (string.IsNullOrWhiteSpace(newest) || IsVersionNewer(version, newest))
+                newest = version.Trim();
+        }
+
+        return newest;
     }
 
     private static bool IsVersionNewer(string latest, string current)

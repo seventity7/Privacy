@@ -149,6 +149,9 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private DateTime refreshSyncOverlayHideAtUtc = DateTime.MinValue;
     private bool localPluginOutdated;
     private bool versionCheckInProgress;
+    private bool dalamudUpdateCheckInProgress;
+    private bool sentOutdatedHeartbeatForCurrentUpdate;
+    private string detectedDalamudUpdateVersion = string.Empty;
     private DateTime nextVersionCheckAtUtc = DateTime.MinValue;
     private int pushedColorCount;
     private int pushedStyleVarCount;
@@ -279,6 +282,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
     public override void Draw()
     {
         CheckPluginVersionIfNeeded();
+        CheckDalamudUpdateAvailability();
         var refreshOverlayActive = ShouldDrawRefreshSyncOverlay();
         var outdatedOverlayActive = localPluginOutdated;
         mainWindowFocusedForManualDrag = ImGui.IsWindowFocused(ImGuiFocusedFlags.RootAndChildWindows);
@@ -365,26 +369,100 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
     private void CheckPluginVersionIfNeeded()
     {
-        if (versionCheckInProgress || DateTime.UtcNow < nextVersionCheckAtUtc)
+        if (localPluginOutdated || versionCheckInProgress || DateTime.UtcNow < nextVersionCheckAtUtc)
             return;
 
         versionCheckInProgress = true;
-        nextVersionCheckAtUtc = DateTime.UtcNow.AddHours(6);
+        nextVersionCheckAtUtc = DateTime.UtcNow.AddMinutes(5);
         _ = Task.Run(async () =>
         {
             try
             {
-                localPluginOutdated = await cloudService.IsCurrentPluginVersionOutdatedAsync(CancellationToken.None).ConfigureAwait(false);
+                var outdated = await cloudService.IsCurrentPluginVersionOutdatedAsync(CancellationToken.None).ConfigureAwait(false);
+                if (outdated)
+                    localPluginOutdated = true;
             }
             catch
             {
-                localPluginOutdated = false;
+                if (!localPluginOutdated)
+                    localPluginOutdated = false;
             }
             finally
             {
                 versionCheckInProgress = false;
             }
         });
+    }
+
+    private void CheckDalamudUpdateAvailability()
+    {
+        if (localPluginOutdated || dalamudUpdateCheckInProgress)
+            return;
+
+        dalamudUpdateCheckInProgress = true;
+        var identity = cloudService.GetLocalCharacterIdentity();
+        var presenceStatus = cloudService.GetCurrentPresenceStatusForRefresh();
+
+        _ = CheckDalamudUpdateAvailabilityAsync(identity, presenceStatus);
+    }
+
+    private async Task CheckDalamudUpdateAvailabilityAsync(CloudCharacterIdentity identity, ContactStatus presenceStatus)
+    {
+        try
+        {
+            var update = await pluginInterface.CheckForUpdateAsync().ConfigureAwait(false);
+            if (update == null)
+                return;
+
+            var latestVersion = ExtractPluginUpdateVersion(update);
+            if (string.IsNullOrWhiteSpace(latestVersion))
+                latestVersion = "update-available";
+
+            detectedDalamudUpdateVersion = latestVersion;
+            localPluginOutdated = true;
+
+            if (!sentOutdatedHeartbeatForCurrentUpdate)
+            {
+                sentOutdatedHeartbeatForCurrentUpdate = true;
+                await cloudService.NotifyPluginUpdateAvailableAsync(identity, presenceStatus, latestVersion, CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "Privacy: Dalamud update-state check failed.");
+        }
+        finally
+        {
+            dalamudUpdateCheckInProgress = false;
+        }
+    }
+
+    private static string ExtractPluginUpdateVersion(object update)
+    {
+        var type = update.GetType();
+        foreach (var propertyName in new[] { "AssemblyVersion", "Version", "LatestVersion", "UpdateVersion", "RemoteVersion" })
+        {
+            var property = type.GetProperty(propertyName);
+            var value = property?.GetValue(update)?.ToString();
+            if (!string.IsNullOrWhiteSpace(value))
+                return value.Trim();
+        }
+
+        var manifestProperty = type.GetProperty("Manifest") ?? type.GetProperty("UpdateManifest") ?? type.GetProperty("RemoteManifest");
+        var manifest = manifestProperty?.GetValue(update);
+        if (manifest != null)
+        {
+            var manifestType = manifest.GetType();
+            foreach (var propertyName in new[] { "AssemblyVersion", "Version" })
+            {
+                var property = manifestType.GetProperty(propertyName);
+                var value = property?.GetValue(manifest)?.ToString();
+                if (!string.IsNullOrWhiteSpace(value))
+                    return value.Trim();
+            }
+        }
+
+        return string.Empty;
     }
 
     private void DrawOutdatedPluginOverlay(Vector2 windowPos, Vector2 windowSize)
