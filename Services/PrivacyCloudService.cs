@@ -10,6 +10,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Reflection;
@@ -44,7 +45,23 @@ internal sealed class PrivacyCloudService : IDisposable
     private readonly IPluginLog log;
     private readonly ICondition condition;
     private readonly FfxivVenuesService ffxivVenuesService;
-    private readonly HttpClient httpClient = new();
+    private readonly HttpClient httpClient = CreateHttpClient();
+
+    private static HttpClient CreateHttpClient()
+    {
+        var handler = new SocketsHttpHandler
+        {
+            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
+            ConnectTimeout = TimeSpan.FromSeconds(12),
+            PooledConnectionIdleTimeout = TimeSpan.FromSeconds(20),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+        };
+
+        return new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(35),
+        };
+    }
 
     private DateTime nextHeartbeat = DateTime.MinValue;
     private ContactStatus lastPresenceStatusSent = ContactStatus.Offline;
@@ -1157,10 +1174,13 @@ internal sealed class PrivacyCloudService : IDisposable
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(apiBase, $"v1/{path.TrimStart('/')}"));
             request.Content = JsonContent.Create(payload, options: JsonOptions);
+            request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true };
+            if (IsPresenceHeartbeatPath(path))
+                request.Headers.ConnectionClose = true;
             if (!string.IsNullOrWhiteSpace(config.CloudAccessToken))
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", config.CloudAccessToken);
 
-            using var response = await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             var body = response.Content == null
                 ? string.Empty
                 : await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
@@ -1184,6 +1204,9 @@ internal sealed class PrivacyCloudService : IDisposable
         }
     }
 
+    private static bool IsPresenceHeartbeatPath(string path)
+        => string.Equals(path.Trim('/'), "presence/heartbeat", StringComparison.OrdinalIgnoreCase);
+
     private bool TryGetApiBaseUri(out Uri uri)
     {
         uri = null!;
@@ -1191,6 +1214,8 @@ internal sealed class PrivacyCloudService : IDisposable
             config.CloudApiBaseUrl = BuildSettings.CloudApiBaseUrl;
 
         var value = config.CloudApiBaseUrl.Trim();
+        if (!value.Contains("://", StringComparison.Ordinal))
+            value = "https://" + value;
         if (!value.EndsWith("/", StringComparison.Ordinal))
             value += "/";
 
