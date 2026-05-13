@@ -243,12 +243,74 @@ internal sealed class PrivacyCloudService : IDisposable
         });
     }
 
+    public ContactStatus GetCurrentPresenceStatusForRefresh()
+        => config.AutoStatusByActivity ? ResolveAutomaticPresenceStatus() : config.CloudPresenceStatus;
+
+    public async Task<string> RefreshSyncNowAsync(CloudCharacterIdentity identity, ContactStatus presenceStatus, ProfileImageCache profileImages, CancellationToken cancellationToken = default)
+    {
+        if (!config.CloudEnabled)
+            return "Cloud sync is disabled.";
+
+        if (!HasApiBaseUrl)
+            return "Cloud API URL is not configured.";
+
+        if (!IsLoggedIn)
+            return "You need to log in first.";
+
+        if (!identity.IsUsable)
+            return "Could not identify the current character.";
+
+        if (syncInProgress)
+            return "Cloud sync is already running.";
+
+        syncInProgress = true;
+        try
+        {
+            await ffxivVenuesService.RefreshAsync(true, cancellationToken).ConfigureAwait(false);
+            await SendHeartbeatAsync(identity, presenceStatus, cancellationToken).ConfigureAwait(false);
+            await SyncOwnProfileAsync(profileImages, identity, cancellationToken).ConfigureAwait(false);
+            await ResolveProfilesAsync(config.Contacts, profileImages, cancellationToken).ConfigureAwait(false);
+
+            config.CloudLastResolveAt = DateTimeOffset.UtcNow;
+            config.Save();
+            nextHeartbeat = DateTime.UtcNow.AddSeconds(StableHeartbeatSeconds);
+            nextProfileResolve = DateTime.UtcNow.AddSeconds(CloudManagedProfileResolveSeconds);
+            return "Refresh sync completed.";
+        }
+        catch (Exception ex)
+        {
+            log.Warning(ex, "Privacy: manual refresh sync failed.");
+            return "Refresh sync failed. Check /xllog for details.";
+        }
+        finally
+        {
+            syncInProgress = false;
+        }
+    }
+
+    public async Task<string> RefreshSyncNowAsync(PrivacyService listService, FriendListService friendListService, ProfileImageCache profileImages, CancellationToken cancellationToken = default)
+    {
+        friendListService.Refresh();
+        listService.RefreshRuntimeState(friendListService.Friends);
+        var identity = GetLocalCharacterIdentity();
+        var presenceStatus = GetCurrentPresenceStatusForRefresh();
+        return await RefreshSyncNowAsync(identity, presenceStatus, profileImages, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<string> SyncOwnProfileAsync(ProfileImageCache profileImages, CancellationToken cancellationToken = default)
     {
         if (!IsLoggedIn)
             return "You need to log in first.";
 
         var identity = GetLinkedOrLocalCharacterIdentity();
+        return await SyncOwnProfileAsync(profileImages, identity, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<string> SyncOwnProfileAsync(ProfileImageCache profileImages, CloudCharacterIdentity identity, CancellationToken cancellationToken = default)
+    {
+        if (!IsLoggedIn)
+            return "You need to log in first.";
+
         if (!identity.IsUsable)
             return "Could not identify the current character.";
 
@@ -260,15 +322,24 @@ internal sealed class PrivacyCloudService : IDisposable
             character = identity,
             displayName = config.CloudProfileDisplayName,
             displayNameEffect = ProfileNameEffects.Normalize(config.CloudProfileDisplayNameEffect),
+            display_name_effect = ProfileNameEffects.Normalize(config.CloudProfileDisplayNameEffect),
             bio = config.CloudProfileBio,
             statusMessage = config.CloudProfileStatusMessage,
+            status_message = config.CloudProfileStatusMessage,
             statusColorHex = config.CloudProfileStatusColorHex,
+            status_color_hex = config.CloudProfileStatusColorHex,
             avatarUrl = config.CloudProfileAvatarUrl,
+            avatar_url = config.CloudProfileAvatarUrl,
             themeName = ProfileVisuals.NormalizeThemeName(config.CloudProfileThemeName),
+            theme_name = ProfileVisuals.NormalizeThemeName(config.CloudProfileThemeName),
             themeColorHex = config.CloudProfileThemeColorHex,
+            theme_color_hex = config.CloudProfileThemeColorHex,
             bannerUrl = config.CloudProfileBannerUrl,
+            banner_url = config.CloudProfileBannerUrl,
             avatarBorderColorHex = config.CloudProfileAvatarBorderColorHex,
+            avatar_border_color_hex = config.CloudProfileAvatarBorderColorHex,
             avatarPlaceholderStyle = config.CloudProfileAvatarPlaceholderStyle,
+            avatar_placeholder_style = config.CloudProfileAvatarPlaceholderStyle,
             permissions = BuildProfilePermissions(),
             venues = GetCloudProfileVenues(),
             localProfile = FindOwnLocalProfile(identity),
@@ -297,16 +368,26 @@ internal sealed class PrivacyCloudService : IDisposable
         {
             character = identity,
             displayName,
+            display_name = displayName,
             displayNameEffect = ProfileNameEffects.Normalize(displayNameEffect),
+            display_name_effect = ProfileNameEffects.Normalize(displayNameEffect),
             bio = bio.Trim().Length > 120 ? bio.Trim()[..120] : bio.Trim(),
             statusMessage = statusMessage.Trim().Length > 60 ? statusMessage.Trim()[..60] : statusMessage.Trim(),
+            status_message = statusMessage.Trim().Length > 60 ? statusMessage.Trim()[..60] : statusMessage.Trim(),
             statusColorHex = NormalizeHex(statusColorHex, "#2BE5B5"),
+            status_color_hex = NormalizeHex(statusColorHex, "#2BE5B5"),
             avatarUrl,
+            avatar_url = avatarUrl,
             themeName = ProfileVisuals.NormalizeThemeName(themeName),
+            theme_name = ProfileVisuals.NormalizeThemeName(themeName),
             themeColorHex = NormalizeHex(themeColorHex, "#2BE5B5"),
+            theme_color_hex = NormalizeHex(themeColorHex, "#2BE5B5"),
             bannerUrl,
+            banner_url = bannerUrl,
             avatarBorderColorHex = NormalizeHex(avatarBorderColorHex, "#2BE5B5"),
+            avatar_border_color_hex = NormalizeHex(avatarBorderColorHex, "#2BE5B5"),
             avatarPlaceholderStyle,
+            avatar_placeholder_style = avatarPlaceholderStyle,
             permissions = BuildProfilePermissions(),
             tag = string.Empty,
             venues = GetCloudProfileVenues(),
@@ -395,15 +476,26 @@ internal sealed class PrivacyCloudService : IDisposable
             profile = new
             {
                 displayName = string.IsNullOrWhiteSpace(config.CloudProfileDisplayName) ? config.CloudDisplayName : config.CloudProfileDisplayName,
+                display_name = string.IsNullOrWhiteSpace(config.CloudProfileDisplayName) ? config.CloudDisplayName : config.CloudProfileDisplayName,
+                displayNameEffect = ProfileNameEffects.Normalize(config.CloudProfileDisplayNameEffect),
+                display_name_effect = ProfileNameEffects.Normalize(config.CloudProfileDisplayNameEffect),
                 bio = config.CloudProfileBio,
                 statusMessage = config.CloudProfileStatusMessage,
+                status_message = config.CloudProfileStatusMessage,
                 statusColorHex = config.CloudProfileStatusColorHex,
+                status_color_hex = config.CloudProfileStatusColorHex,
                 avatarUrl = config.CloudProfileAvatarUrl,
+                avatar_url = config.CloudProfileAvatarUrl,
                 themeName = ProfileVisuals.NormalizeThemeName(config.CloudProfileThemeName),
+                theme_name = ProfileVisuals.NormalizeThemeName(config.CloudProfileThemeName),
                 themeColorHex = config.CloudProfileThemeColorHex,
+                theme_color_hex = config.CloudProfileThemeColorHex,
                 bannerUrl = config.CloudProfileBannerUrl,
+                banner_url = config.CloudProfileBannerUrl,
                 avatarBorderColorHex = config.CloudProfileAvatarBorderColorHex,
+                avatar_border_color_hex = config.CloudProfileAvatarBorderColorHex,
                 avatarPlaceholderStyle = config.CloudProfileAvatarPlaceholderStyle,
+                avatar_placeholder_style = config.CloudProfileAvatarPlaceholderStyle,
                 permissions = BuildProfilePermissions(),
                 tag = config.CloudProfileTag,
                 venues = GetCloudProfileVenues(),
@@ -571,10 +663,19 @@ internal sealed class PrivacyCloudService : IDisposable
             contact.CurrentWorldId = profile.CurrentWorldId;
         if (!string.IsNullOrWhiteSpace(profile.CurrentDataCenter))
             contact.CurrentDataCenter = profile.CurrentDataCenter;
+        var previousZone = contact.LastKnownZone;
         if (!string.IsNullOrWhiteSpace(profile.CurrentZone))
+        {
             contact.LastKnownZone = profile.CurrentZone;
+            if (!string.Equals(NormalizeLocationForComparison(previousZone), NormalizeLocationForComparison(profile.CurrentZone), StringComparison.OrdinalIgnoreCase) &&
+                string.IsNullOrWhiteSpace(profile.ResidentialDetails))
+                contact.ResidentialDetails = string.Empty;
+        }
+
         if (!string.IsNullOrWhiteSpace(profile.ResidentialDetails))
             contact.ResidentialDetails = profile.ResidentialDetails;
+        else if (!string.IsNullOrWhiteSpace(profile.CurrentZone) && !LooksLikeResidentialLocation(profile.CurrentZone))
+            contact.ResidentialDetails = string.Empty;
 
         if (!string.IsNullOrWhiteSpace(profile.AvatarUrl))
         {
@@ -591,6 +692,29 @@ internal sealed class PrivacyCloudService : IDisposable
                 }
             }
         }
+    }
+
+
+    private static string NormalizeLocationForComparison(string value)
+        => string.IsNullOrWhiteSpace(value)
+            ? string.Empty
+            : System.Text.RegularExpressions.Regex.Replace(value.Trim(), @"\s+", " ");
+
+    private static bool LooksLikeResidentialLocation(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        return value.Contains("Mist", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Lavender", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Lavander", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Goblet", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Shirogane", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Empyreum", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Private Mansion", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Private Cottage", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Private House", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Apartment", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string BuildAvatarCacheVersion(CloudProfileSnapshot profile)
@@ -668,8 +792,7 @@ internal sealed class PrivacyCloudService : IDisposable
         config.CloudProfileAvatarPlaceholderStyle = response.Profile?.AvatarPlaceholderStyle ?? config.CloudProfileAvatarPlaceholderStyle;
         ApplyProfilePermissions(response.Profile?.Permissions);
         config.CloudProfileTag = response.Profile?.Tag ?? config.CloudProfileTag;
-        if (response.Profile?.Venues is { Count: > 0 })
-            config.CloudSavedVenues = response.Profile.Venues;
+        MergeCloudProfileVenues(response.Profile?.Venues);
         config.CloudAccountProvider = string.IsNullOrWhiteSpace(response.Provider) ? fallbackProvider : response.Provider;
         config.CloudTokenExpiresAt = response.ExpiresAt == DateTimeOffset.MinValue ? DateTimeOffset.UtcNow.AddDays(7) : response.ExpiresAt;
         config.CloudLinkedCharacterName = identity.CharacterName;
@@ -703,8 +826,77 @@ internal sealed class PrivacyCloudService : IDisposable
         config.CloudProfileAvatarPlaceholderStyle = response.Profile.AvatarPlaceholderStyle ?? config.CloudProfileAvatarPlaceholderStyle;
         ApplyProfilePermissions(response.Profile.Permissions);
         config.CloudProfileTag = response.Profile.Tag ?? config.CloudProfileTag;
-        if (response.Profile.Venues is { Count: > 0 })
-            config.CloudSavedVenues = response.Profile.Venues;
+        MergeCloudProfileVenues(response.Profile.Venues);
+    }
+
+
+    private void MergeCloudProfileVenues(IReadOnlyList<PrivateVenueBookmark>? remoteVenues)
+    {
+        if (remoteVenues == null)
+            return;
+
+        // The cloud profile returns only venues that are public on the profile.
+        // Keep locally saved venue-location entries too, otherwise the My Profile > Venues
+        // list loses manual/local venues as soon as a profile save/heartbeat response arrives.
+        if (remoteVenues.Count == 0)
+            return;
+
+        var existingLocal = config.CloudSavedVenues ?? new List<PrivateVenueBookmark>();
+        var merged = new List<PrivateVenueBookmark>();
+        var usedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var remote in remoteVenues.Where(v => v != null))
+        {
+            var key = GetVenueMergeKey(remote);
+            var local = existingLocal.FirstOrDefault(v => string.Equals(GetVenueMergeKey(v), key, StringComparison.OrdinalIgnoreCase));
+
+            var copy = new PrivateVenueBookmark
+            {
+                Name = remote.Name,
+                DataCenter = remote.DataCenter,
+                World = remote.World,
+                District = remote.District,
+                Ward = remote.Ward,
+                Plot = remote.Plot,
+                Address = remote.Address,
+                ImageUrl = remote.ImageUrl,
+                ImageLocalPath = !string.IsNullOrWhiteSpace(local?.ImageLocalPath) ? local.ImageLocalPath : remote.ImageLocalPath,
+                WebsiteUrl = remote.WebsiteUrl,
+                DiscordUrl = remote.DiscordUrl,
+                TeleportCommand = remote.TeleportCommand,
+                Favorite = true,
+                TooltipTag = remote.TooltipTag,
+                TooltipTagColorHex = NormalizeHex(remote.TooltipTagColorHex, "#B56CFF"),
+                Source = string.IsNullOrWhiteSpace(remote.Source) ? local?.Source ?? "FFXIVVenues" : remote.Source,
+            };
+
+            merged.Add(copy);
+            usedKeys.Add(key);
+        }
+
+        foreach (var local in existingLocal)
+        {
+            var key = GetVenueMergeKey(local);
+            if (usedKeys.Contains(key))
+                continue;
+
+            merged.Add(local);
+            usedKeys.Add(key);
+        }
+
+        config.CloudSavedVenues = merged;
+    }
+
+    private static string GetVenueMergeKey(PrivateVenueBookmark venue)
+    {
+        var address = venue.BuildAddress();
+        if (!string.IsNullOrWhiteSpace(address))
+            return NormalizeVenueAddress(address);
+
+        if (!string.IsNullOrWhiteSpace(venue.Address))
+            return NormalizeVenueAddress(venue.Address);
+
+        return NormalizeVenueAddress($"{venue.DataCenter}|{venue.World}|{venue.District}|{venue.Ward}|{venue.Plot}|{venue.Name}");
     }
 
     private object BuildProfilePermissions()
@@ -1329,6 +1521,27 @@ internal sealed class PrivacyCloudService : IDisposable
         public string? AvatarPlaceholderStyle { get; set; }
         public CloudProfilePermissionsDto? Permissions { get; set; }
         public string? AvatarUrl { get; set; }
+
+        [JsonPropertyName("display_name")]
+        public string? DisplayNameSnake { set => DisplayName = value; }
+        [JsonPropertyName("display_name_effect")]
+        public string? DisplayNameEffectSnake { set => DisplayNameEffect = value; }
+        [JsonPropertyName("status_message")]
+        public string? StatusMessageSnake { set => StatusMessage = value; }
+        [JsonPropertyName("status_color_hex")]
+        public string? StatusColorHexSnake { set => StatusColorHex = value; }
+        [JsonPropertyName("avatar_url")]
+        public string? AvatarUrlSnake { set => AvatarUrl = value; }
+        [JsonPropertyName("theme_name")]
+        public string? ThemeNameSnake { set => ThemeName = value; }
+        [JsonPropertyName("theme_color_hex")]
+        public string? ThemeColorHexSnake { set => ThemeColorHex = value; }
+        [JsonPropertyName("banner_url")]
+        public string? BannerUrlSnake { set => BannerUrl = value; }
+        [JsonPropertyName("avatar_border_color_hex")]
+        public string? AvatarBorderColorHexSnake { set => AvatarBorderColorHex = value; }
+        [JsonPropertyName("avatar_placeholder_style")]
+        public string? AvatarPlaceholderStyleSnake { set => AvatarPlaceholderStyle = value; }
         public string? Tag { get; set; }
         public List<PrivateVenueBookmark> Venues { get; set; } = new();
         public string? UpdatedAt { get; set; }

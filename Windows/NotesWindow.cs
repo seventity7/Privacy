@@ -54,7 +54,7 @@ internal sealed class NotesWindow : Window
         PushColor(ImGuiCol.WindowBg, Vector4.Zero);
         PushColor(ImGuiCol.ChildBg, Vector4.Zero);
         PushColor(ImGuiCol.PopupBg, UiColors.Get("PrivatePopupBg"));
-        PushColor(ImGuiCol.Border, Vector4.Zero);
+        PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.55f));
         PushColor(ImGuiCol.FrameBg, UiColors.Get("PrivateFrameBg"));
         PushColor(ImGuiCol.FrameBgHovered, UiColors.Get("PrivateFrameBgHovered"));
         PushColor(ImGuiCol.FrameBgActive, UiColors.Get("PrivateFrameBgActive"));
@@ -74,7 +74,8 @@ internal sealed class NotesWindow : Window
         PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(6f, 6f) * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.WindowRounding, 7f * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.ChildRounding, 4f * ImGuiHelpers.GlobalScale);
-        PushStyleVar(ImGuiStyleVar.FrameRounding, 4f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameRounding, 5f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f * ImGuiHelpers.GlobalScale);
     }
 
     public override void PostDraw()
@@ -108,12 +109,12 @@ var drawList = ImGui.GetWindowDrawList();
 
         ImGui.TextColored(config.AccentColor, string.IsNullOrWhiteSpace(contact.World) ? contact.DisplayName : $"{contact.Name}@{contact.World}");
         ImGui.TextDisabled("This note is also used as the name tooltip in the main list.");
-        ImGui.Separator();
+        ThemedWidgets.FadeSeparator(config.AccentColor);
 
         var size = new Vector2(-1f, ImGui.GetContentRegionAvail().Y - 38f * ImGuiHelpers.GlobalScale);
         ImGui.InputTextMultiline("##privacy_notes", ref buffer, 8192, size);
 
-        if (ImGui.Button("Save", new Vector2(100f, 0f) * ImGuiHelpers.GlobalScale))
+        if (ThemedWidgets.Button("Save", new Vector2(100f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
         {
             contact.Notes = buffer;
             config.Save();
@@ -121,7 +122,7 @@ var drawList = ImGui.GetWindowDrawList();
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Close", new Vector2(100f, 0f) * ImGuiHelpers.GlobalScale))
+        if (ThemedWidgets.Button("Close", new Vector2(100f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
         {
             IsOpen = false;
         }

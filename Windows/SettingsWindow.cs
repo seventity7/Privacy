@@ -76,7 +76,7 @@ internal sealed class SettingsWindow : Window
         PushColor(ImGuiCol.TextDisabled, UiColors.TextDim);
         PushColor(ImGuiCol.WindowBg, Vector4.Zero);
         PushColor(ImGuiCol.ChildBg, Vector4.Zero);
-        PushColor(ImGuiCol.Border, Vector4.Zero);
+        PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.55f));
         PushColor(ImGuiCol.FrameBg, UiColors.Get("PrivateFrameBg"));
         PushColor(ImGuiCol.FrameBgHovered, UiColors.Get("PrivateFrameBgHovered"));
         PushColor(ImGuiCol.FrameBgActive, UiColors.Get("PrivateFrameBgActive"));
@@ -97,7 +97,8 @@ internal sealed class SettingsWindow : Window
         PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(6f, 6f) * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.WindowRounding, 7f * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.ChildRounding, 4f * ImGuiHelpers.GlobalScale);
-        PushStyleVar(ImGuiStyleVar.FrameRounding, 4f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameRounding, 5f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f * ImGuiHelpers.GlobalScale);
     }
 
     public override void PostDraw()
@@ -111,7 +112,8 @@ internal sealed class SettingsWindow : Window
     {
         
         WindowEdgeFade.DrawUnified(config.WindowBackgroundColor, config.AccentColor);
-var drawList = ImGui.GetWindowDrawList();
+        var drawList = ImGui.GetWindowDrawList();
+        HeaderDecor.DrawBackgroundOverlay(drawList, ImGui.GetWindowPos(), ImGui.GetWindowSize(), config.WindowBackgroundColor, config.AccentColor);
         var pos = ImGui.GetCursorScreenPos();
         var width = ImGui.GetContentRegionAvail().X;
         var headerHeight = 58f * ImGuiHelpers.GlobalScale;
@@ -135,7 +137,7 @@ var drawList = ImGui.GetWindowDrawList();
         }
         changed |= ImGui.Checkbox("Hide top counter bar", ref config.HideTopBar);
 
-        ImGui.Separator();
+        ThemedWidgets.FadeSeparator(config.AccentColor);
         ImGui.TextColored(config.AccentColor, "Activity and shortcuts");
         changed |= ImGui.Checkbox("Auto status by activity", ref config.AutoStatusByActivity);
         if (ImGui.IsItemHovered())
@@ -145,14 +147,14 @@ var drawList = ImGui.GetWindowDrawList();
         changed |= DrawShortcutField("Open target online profile", ref config.OpenTargetProfileShortcut);
         changed |= DrawShortcutField("Open target notes", ref config.OpenTargetNotesShortcut);
 
-        ImGui.Separator();
+        ThemedWidgets.FadeSeparator(config.AccentColor);
         ImGui.TextColored(config.AccentColor, "Notifications");
         changed |= ImGui.Checkbox("Show online count on login", ref config.NotifyOnlineCountOnLogin);
         changed |= ImGui.Checkbox("Notify favorite contacts automatically", ref config.NotifyFavoriteContacts);
         changed |= ImGui.Checkbox("Only send status notifications for favorites", ref config.NotifyOnlyFavorites);
 
-        ImGui.Separator();
-        ImGui.TextColored(config.AccentColor, "Global colors");
+        ThemedWidgets.FadeSeparator(config.AccentColor);
+        ImGui.TextColored(config.AccentColor, "Colors & Theme");
         if (ImGui.BeginTable("global-colors-layout", 2, ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.NoSavedSettings))
         {
             ImGui.TableSetupColumn("Colors", ImGuiTableColumnFlags.WidthStretch, 0.70f);
@@ -178,7 +180,7 @@ var drawList = ImGui.GetWindowDrawList();
             ImGui.EndTable();
         }
 
-        ImGui.Separator();
+        ImGui.Spacing();
         DrawMaintenanceButtons();
         DrawMainBackgroundImagePicker();
 
@@ -201,7 +203,7 @@ var drawList = ImGui.GetWindowDrawList();
             ? (string.IsNullOrWhiteSpace(pendingShortcutValue) ? "Press keys..." : pendingShortcutValue)
             : (string.IsNullOrWhiteSpace(value) ? "Unbound" : value);
 
-        if (ImGui.Button($"{buttonText}##{id}", new Vector2(180f, 0f) * scale))
+        if (ThemedWidgets.Button($"{buttonText}##{id}", new Vector2(180f, 0f) * scale, config.AccentColor))
         {
             recordingShortcutId = id;
             pendingShortcutValue = string.Empty;
@@ -311,11 +313,11 @@ var drawList = ImGui.GetWindowDrawList();
     {
         if (!confirmClear)
         {
-            if (ImGui.Button("Clear all contacts", new Vector2(180f, 0f) * ImGuiHelpers.GlobalScale))
+            if (ThemedWidgets.Button("Clear all contacts", new Vector2(180f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
                 confirmClear = true;
 
             ImGui.SameLine();
-            if (ImGui.Button("Reset theme", new Vector2(130f, 0f) * ImGuiHelpers.GlobalScale))
+            if (ThemedWidgets.Button("Reset theme", new Vector2(130f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
             {
                 ResetThemeToDefault();
                 config.Save();
@@ -324,7 +326,7 @@ var drawList = ImGui.GetWindowDrawList();
         else
         {
             ImGui.TextColored(new Vector4(1f, 0.35f, 0.25f, 1f), "Click again to confirm clearing all contacts.");
-            if (ImGui.Button("Confirm clear"))
+            if (ThemedWidgets.Button("Confirm clear", Vector2.Zero, config.AccentColor))
             {
                 config.Contacts.Clear();
                 foreach (var group in config.Groups) group.ContactIds.Clear();
@@ -332,7 +334,7 @@ var drawList = ImGui.GetWindowDrawList();
                 confirmClear = false;
             }
             ImGui.SameLine();
-            if (ImGui.Button("Cancel"))
+            if (ThemedWidgets.Button("Cancel", Vector2.Zero, config.AccentColor))
                 confirmClear = false;
         }
 
@@ -1047,7 +1049,7 @@ var drawList = ImGui.GetWindowDrawList();
         var selected = string.Equals(config.CustomBackgroundEffectName, effectName, StringComparison.Ordinal);
 
         using var disabled = ImRaii.Disabled(!hasImage);
-        if (ImGui.Button(label, buttonSize) && hasImage)
+        if (ThemedWidgets.Button(label, buttonSize, config.AccentColor) && hasImage)
         {
             config.CustomBackgroundEffectName = selected ? string.Empty : effectName;
             if (!selected)
@@ -1187,7 +1189,6 @@ var drawList = ImGui.GetWindowDrawList();
         config.TopBarBackgroundColor = new Vector4(0.188f, 0.200f, 0.192f, 0.34f);
         config.BottomBarBackgroundColor = new Vector4(0.188f, 0.200f, 0.192f, 0.34f);
         config.UserRowBackgroundColor = new Vector4(0.067f, 0.110f, 0.098f, 0.66f);
-        config.HideUserRowBackground = false;
         config.ThemePresetName = "Default";
         config.CustomBackgroundEffectName = string.Empty;
     }
@@ -1225,7 +1226,7 @@ var drawList = ImGui.GetWindowDrawList();
                 changed = true;
             }
 
-            ImGui.Separator();
+            ThemedWidgets.FadeSeparator(config.AccentColor);
             ImGui.TextDisabled("HEX");
             ImGui.SameLine();
 
@@ -1242,7 +1243,7 @@ var drawList = ImGui.GetWindowDrawList();
             }
 
             ImGui.SameLine();
-            if (ImGui.Button($"Copy##{label}_hex_copy"))
+            if (ThemedWidgets.Button($"Copy##{label}_hex_copy", Vector2.Zero, config.AccentColor))
                 ImGui.SetClipboardText(colorHexInputs.TryGetValue(inputId, out var copyHex) ? copyHex : currentHex);
 
             ImGui.EndPopup();
@@ -1341,7 +1342,7 @@ var drawList = ImGui.GetWindowDrawList();
     private bool ThemePresetButton(string label, Vector2 size, Action apply)
     {
         var selected = string.Equals(config.ThemePresetName, label, StringComparison.Ordinal);
-        if (!ImGui.Button(label, size))
+        if (!ThemedWidgets.Button(label, size, GetThemePresetBorderColor(label)))
         {
             DrawThemePresetButtonBorder(label, selected);
             return false;
@@ -1401,7 +1402,6 @@ var drawList = ImGui.GetWindowDrawList();
         config.TopBarBackgroundColor = topBarBg;
         config.BottomBarBackgroundColor = bottomBarBg;
         config.UserRowBackgroundColor = rowBg;
-        config.HideUserRowBackground = false;
     }
 
     private static string HexFromColor(Vector4 color, bool includeAlpha)

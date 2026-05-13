@@ -135,7 +135,7 @@ internal sealed class MyProfileWindow : Window
         PushColor(ImGuiCol.TextDisabled, UiColors.TextDim);
         PushColor(ImGuiCol.WindowBg, Vector4.Zero);
         PushColor(ImGuiCol.ChildBg, Vector4.Zero);
-        PushColor(ImGuiCol.Border, Vector4.Zero);
+        PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.55f));
         PushColor(ImGuiCol.FrameBg, Darken(UiColors.Get("PrivateFrameBg"), 0.015f));
         PushColor(ImGuiCol.FrameBgHovered, Darken(UiColors.Get("PrivateFrameBgHovered"), 0.01f));
         PushColor(ImGuiCol.FrameBgActive, Darken(UiColors.Get("PrivateFrameBgActive"), 0.005f));
@@ -157,7 +157,8 @@ internal sealed class MyProfileWindow : Window
         PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(6f, 6f) * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.WindowRounding, 7f * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.ChildRounding, 4f * ImGuiHelpers.GlobalScale);
-        PushStyleVar(ImGuiStyleVar.FrameRounding, 4f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameRounding, 5f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f * ImGuiHelpers.GlobalScale);
     }
 
     public override void PostDraw()
@@ -170,6 +171,7 @@ internal sealed class MyProfileWindow : Window
     public override void Draw()
     {
         WindowEdgeFade.DrawUnified(config.WindowBackgroundColor, config.AccentColor);
+        HeaderDecor.DrawBackgroundOverlay(ImGui.GetWindowDrawList(), ImGui.GetWindowPos(), ImGui.GetWindowSize(), config.WindowBackgroundColor, config.AccentColor);
 
         using var body = ImRaii.Child("my-profile-body", new Vector2(-1f, -1f), false);
         if (!body) return;
@@ -198,14 +200,14 @@ internal sealed class MyProfileWindow : Window
         if (HasUnsavedProfileChanges())
             ImGui.TextColored(new Vector4(1.00f, 0.78f, 0.28f, 1f), "Unsaved profile changes.");
 
-        ImGui.Separator();
+        ThemedWidgets.FadeSeparator(config.AccentColor);
         DrawFavoriteVenuesSection();
 
         ImGui.TextColored(config.AccentColor, "Profile Preview:");
         ImGui.Dummy(new Vector2(1f, 3f * ImGuiHelpers.GlobalScale));
         DrawProfilePreview();
 
-        ImGui.Separator();
+        ThemedWidgets.FadeSeparator(config.AccentColor);
         DrawVenuesSection();
     }
 
@@ -354,7 +356,7 @@ internal sealed class MyProfileWindow : Window
             ImGui.Spacing();
 
             var buttonWidth = 58f * scale;
-            if (ImGui.Button("Yes##confirm_reset_fields", new Vector2(buttonWidth, 0f)))
+            if (ThemedWidgets.Button("Yes##confirm_reset_fields", new Vector2(buttonWidth, 0f), config.AccentColor))
             {
                 fieldsInitialized = false;
                 EnsureProfileFieldsInitialized();
@@ -362,7 +364,7 @@ internal sealed class MyProfileWindow : Window
             }
 
             ImGui.SameLine();
-            if (ImGui.Button("No##cancel_reset_fields", new Vector2(buttonWidth, 0f)))
+            if (ThemedWidgets.Button("No##cancel_reset_fields", new Vector2(buttonWidth, 0f), config.AccentColor))
                 ImGui.CloseCurrentPopup();
 
             ImGui.EndPopup();
@@ -395,6 +397,8 @@ internal sealed class MyProfileWindow : Window
         profileEditorFieldWidth = fieldWidth;
         ImGui.SetNextItemWidth(fieldWidth);
         var displayInputPos = ImGui.GetCursorScreenPos();
+        using (ImRaii.PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.62f)))
+        using (ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, 1f * scale))
         using (ImRaii.PushColor(ImGuiCol.Text, UiColors.WithAlpha(UiColors.Text, ProfileNameEffects.Normalize(profileDisplayNameEffect).Equals("None", StringComparison.OrdinalIgnoreCase) ? 1f : 0.01f)))
             ImGui.InputTextWithHint("##my_profile_display", "Display name", ref profileDisplayName, 48);
         if (!ProfileNameEffects.Normalize(profileDisplayNameEffect).Equals("None", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(profileDisplayName))
@@ -420,6 +424,8 @@ internal sealed class MyProfileWindow : Window
 
         var statusWidth = fieldWidth;
         ImGui.SetNextItemWidth(statusWidth);
+        using (ImRaii.PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.62f)))
+        using (ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, 1f * scale))
         using (ImRaii.PushColor(ImGuiCol.Text, UiColors.HexToRgba(NormalizeHex(profileStatusColorHex, "#2BE5B5"))))
             ImGui.InputTextWithHint("##my_profile_status", "Status message", ref profileStatusMessage, 60);
         ImGui.SameLine();
@@ -430,14 +436,16 @@ internal sealed class MyProfileWindow : Window
             ImGui.SetTooltip($"Status message color: {NormalizeHex(profileStatusColorHex, "#2BE5B5")}");
 
         ImGui.SetNextItemWidth(fieldWidth);
-        ImGui.InputTextMultiline("##my_profile_bio", ref profileBio, 120, new Vector2(fieldWidth, 74f * scale));
+        using (ImRaii.PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.62f)))
+        using (ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, 1f * scale))
+            ImGui.InputTextMultiline("##my_profile_bio", ref profileBio, 120, new Vector2(fieldWidth, 74f * scale));
     }
 
-    private static bool DrawThemeSelector(string id, ref int selectedIndex, float scale)
+    private static bool DrawThemeSelector(string id, ref int selectedIndex, float scale, Vector4 accent)
     {
         var changed = false;
         var current = ProfileVisuals.ThemeNames[Math.Clamp(selectedIndex, 0, ProfileVisuals.ThemeNames.Length - 1)];
-        if (!ImGui.BeginCombo(id, current))
+        if (!ThemedWidgets.BeginCombo(id, current, accent))
             return false;
 
         var visibleRows = MathF.Min(6f, ProfileVisuals.ThemeNames.Length);
@@ -447,10 +455,17 @@ internal sealed class MyProfileWindow : Window
             for (var i = 0; i < ProfileVisuals.ThemeNames.Length; i++)
             {
                 var selected = i == selectedIndex;
-                if (ImGui.Selectable(ProfileVisuals.ThemeNames[i], selected))
+                var entryAccent = ProfileVisuals.ResolvePalette(ProfileVisuals.ThemeNames[i], accent, new Vector4(0.02f, 0.02f, 0.02f, 1f)).Accent;
+                using (ImRaii.PushColor(ImGuiCol.Text, selected ? UiColors.Text : ProfileVisuals.ResolvePalette(ProfileVisuals.ThemeNames[i], accent, new Vector4(0.02f, 0.02f, 0.02f, 1f)).Title))
+                using (ImRaii.PushColor(ImGuiCol.Header, UiColors.WithAlpha(entryAccent, selected ? 0.44f : 0.18f)))
+                using (ImRaii.PushColor(ImGuiCol.HeaderHovered, UiColors.WithAlpha(entryAccent, 0.34f)))
+                using (ImRaii.PushColor(ImGuiCol.HeaderActive, UiColors.WithAlpha(entryAccent, 0.50f)))
                 {
-                    selectedIndex = i;
-                    changed = true;
+                    if (ImGui.Selectable(ProfileVisuals.ThemeNames[i], selected))
+                    {
+                        selectedIndex = i;
+                        changed = true;
+                    }
                 }
                 if (selected)
                     ImGui.SetItemDefaultFocus();
@@ -469,14 +484,14 @@ internal sealed class MyProfileWindow : Window
         var themeIndex = Array.FindIndex(ProfileVisuals.ThemeNames, t => string.Equals(t, profileThemeName, StringComparison.OrdinalIgnoreCase));
         if (themeIndex < 0) themeIndex = 0;
         ImGui.SetNextItemWidth(150f * scale);
-        if (DrawThemeSelector("##profile_theme_name", ref themeIndex, scale))
+        if (DrawThemeSelector("##profile_theme_name", ref themeIndex, scale, UiColors.HexToRgba(NormalizeHex(profileThemeColorHex, "#2BE5B5"))))
             profileThemeName = ProfileVisuals.ThemeNames[Math.Clamp(themeIndex, 0, ProfileVisuals.ThemeNames.Length - 1)];
 
         ImGui.SameLine();
         ImGui.SetNextItemWidth(132f * scale);
         var placeholderIndex = Array.FindIndex(ProfileVisuals.PlaceholderStyles, t => string.Equals(t, profileAvatarPlaceholderStyle, StringComparison.OrdinalIgnoreCase));
         if (placeholderIndex < 0) placeholderIndex = 0;
-        if (ImGui.Combo("##profile_placeholder_style", ref placeholderIndex, ProfileVisuals.PlaceholderStyles, ProfileVisuals.PlaceholderStyles.Length))
+        if (ThemedWidgets.Combo("##profile_placeholder_style", ref placeholderIndex, ProfileVisuals.PlaceholderStyles, ProfileVisuals.PlaceholderStyles.Length, config.AccentColor))
             profileAvatarPlaceholderStyle = ProfileVisuals.PlaceholderStyles[Math.Clamp(placeholderIndex, 0, ProfileVisuals.PlaceholderStyles.Length - 1)];
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Used when no profile picture is available.");
@@ -492,7 +507,9 @@ internal sealed class MyProfileWindow : Window
 
         var bannerWidth = MathF.Min(MathF.Max(220f * scale, profileEditorFieldWidth), MathF.Max(180f * scale, availableWidth - 28f * scale));
         ImGui.SetNextItemWidth(bannerWidth);
-        ImGui.InputTextWithHint("##profile_banner_url", "Banner image URL", ref profileBannerUrl, 260);
+        using (ImRaii.PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.62f)))
+        using (ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, 1f * scale))
+            ImGui.InputTextWithHint("##profile_banner_url", "Banner image URL", ref profileBannerUrl, 260);
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Optional public banner/header image URL shown on your Online Profile.");
 
@@ -526,7 +543,7 @@ internal sealed class MyProfileWindow : Window
         }
     }
 
-    private static void DrawVisibilityCombo(string label, ref string value, bool hiddenLabel = false)
+    private void DrawVisibilityCombo(string label, ref string value, bool hiddenLabel = false)
     {
         var scale = ImGuiHelpers.GlobalScale;
         var currentValue = value;
@@ -534,7 +551,7 @@ internal sealed class MyProfileWindow : Window
         if (index < 0) index = 0;
         ImGui.SetNextItemWidth(112f * scale);
         var comboLabel = hiddenLabel ? $"##profile_visibility_{label}" : $"{label}##profile_visibility_{label}";
-        if (ImGui.Combo(comboLabel, ref index, ProfileVisuals.VisibilityOptions, ProfileVisuals.VisibilityOptions.Length))
+        if (ThemedWidgets.Combo(comboLabel, ref index, ProfileVisuals.VisibilityOptions, ProfileVisuals.VisibilityOptions.Length, config.AccentColor))
             value = ProfileVisuals.VisibilityOptions[Math.Clamp(index, 0, ProfileVisuals.VisibilityOptions.Length - 1)];
     }
 
@@ -822,6 +839,10 @@ internal sealed class MyProfileWindow : Window
 
     private string ResolvePreviewVenueName(PrivateContact profile)
     {
+        var liveVenueName = ResolveCurrentPreviewVenueName(profile);
+        if (!string.IsNullOrWhiteSpace(liveVenueName))
+            return liveVenueName;
+
         var dataCenter = string.IsNullOrWhiteSpace(profile.CurrentDataCenter) ? profile.DataCenter : profile.CurrentDataCenter;
         var world = string.IsNullOrWhiteSpace(profile.CurrentWorld) ? profile.World : profile.CurrentWorld;
         var district = ResolvePreviewResidentialDistrict(profile);
@@ -829,32 +850,19 @@ internal sealed class MyProfileWindow : Window
         var plotText = ExtractPreviewHousingNumber(profile.ResidentialDetails, "Plot", "p");
         var ward = 0;
         var plot = 0;
-        var hasHousingParts = int.TryParse(wardText, out ward) && int.TryParse(plotText, out plot);
+        var hasWard = int.TryParse(wardText, out ward);
+        var hasPlot = int.TryParse(plotText, out plot);
+        var hasHousingParts = hasWard && hasPlot;
 
         if (hasHousingParts)
         {
-            var fieldMatch = config.CloudSavedVenues.FirstOrDefault(v =>
-                !string.IsNullOrWhiteSpace(v.Name) &&
-                VenueFieldMatches(v.DataCenter, dataCenter) &&
-                VenueFieldMatches(v.World, world) &&
-                SameVenueDistrict(v.District, district) &&
-                v.Ward == ward &&
-                v.Plot == plot);
-            if (fieldMatch != null)
-                return fieldMatch.Name;
+            var savedMatch = FindSavedVenueAtAddress(dataCenter, world, district, ward, plot);
+            if (savedMatch != null)
+                return savedMatch.Name;
 
-            // Some game snapshots can miss the visited DC/world or format them differently.
-            // If district/ward/plot are exact and there is only one saved venue at that address,
-            // prefer showing the venue badge instead of hiding it completely.
-            var housingOnlyMatches = config.CloudSavedVenues
-                .Where(v => !string.IsNullOrWhiteSpace(v.Name) &&
-                    SameVenueDistrict(v.District, district) &&
-                    v.Ward == ward &&
-                    v.Plot == plot)
-                .Take(2)
-                .ToList();
-            if (housingOnlyMatches.Count == 1)
-                return housingOnlyMatches[0].Name;
+            var catalogMatch = FindCatalogVenueAtAddress(dataCenter, world, district, ward, plot, PreviewIsSubdivision(profile));
+            if (catalogMatch != null)
+                return catalogMatch.Name;
         }
 
         var address = BuildPreviewVenueAddress(profile);
@@ -869,10 +877,108 @@ internal sealed class MyProfileWindow : Window
                 return match.Name;
         }
 
-        if (hasHousingParts)
-            return ffxivVenuesService.FindByAddress(dataCenter, world, district, ward, plot)?.Name ?? string.Empty;
-
         return string.Empty;
+    }
+
+    private string ResolveCurrentPreviewVenueName(PrivateContact profile)
+    {
+        if (!clientState.IsLoggedIn || !string.Equals(profile.Id, "self-profile-preview", StringComparison.OrdinalIgnoreCase))
+            return string.Empty;
+
+        try
+        {
+            var snapshot = GameLocationResolver.GetCurrent(dataManager, clientState);
+            if (!snapshot.IsResidential || string.IsNullOrWhiteSpace(snapshot.ResidentialDistrict) || snapshot.Ward <= 0 || snapshot.Plot <= 0)
+                return string.Empty;
+
+            var currentWorldId = ResolveLocalCurrentWorldId();
+            var world = ResolveWorldName(currentWorldId);
+            if (string.IsNullOrWhiteSpace(world))
+                world = string.IsNullOrWhiteSpace(profile.CurrentWorld) ? profile.World : profile.CurrentWorld;
+
+            var dataCenter = ResolveDataCenterName(currentWorldId);
+            if (string.IsNullOrWhiteSpace(dataCenter))
+                dataCenter = string.IsNullOrWhiteSpace(profile.CurrentDataCenter) ? profile.DataCenter : profile.CurrentDataCenter;
+            if (string.IsNullOrWhiteSpace(dataCenter))
+                dataCenter = ResolveDataCenterForWorld(world);
+
+            var savedMatch = FindSavedVenueAtAddress(dataCenter, world, snapshot.ResidentialDistrict, snapshot.Ward, snapshot.Plot);
+            if (savedMatch != null)
+                return savedMatch.Name;
+
+            var catalogMatch = FindCatalogVenueAtAddress(dataCenter, world, snapshot.ResidentialDistrict, snapshot.Ward, snapshot.Plot, snapshot.Subdivision);
+            return catalogMatch?.Name ?? string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private FfxivVenueEntry? FindCatalogVenueAtAddress(string dataCenter, string world, string district, int ward, int plot, bool? subdivision)
+    {
+        if (string.IsNullOrWhiteSpace(world) || string.IsNullOrWhiteSpace(district) || ward <= 0 || plot <= 0)
+            return null;
+
+        foreach (var candidatePlot in BuildPlotCandidates(plot))
+        {
+            var match = ffxivVenuesService.FindByAddress(dataCenter, world, district, ward, candidatePlot, subdivision);
+            if (match != null)
+                return match;
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<int> BuildPlotCandidates(int plot)
+    {
+        if (plot <= 0)
+            yield break;
+
+        yield return plot;
+
+        if (plot <= 30)
+            yield return plot + 30;
+        else
+            yield return plot - 30;
+
+        yield return plot + 1;
+        if (plot > 1)
+            yield return plot - 1;
+    }
+
+    private PrivateVenueBookmark? FindSavedVenueAtAddress(string dataCenter, string world, string district, int ward, int plot)
+    {
+        var fieldMatch = config.CloudSavedVenues.FirstOrDefault(v =>
+            !string.IsNullOrWhiteSpace(v.Name) &&
+            VenueFieldMatches(v.DataCenter, dataCenter) &&
+            VenueFieldMatches(v.World, world) &&
+            SameVenueDistrict(v.District, district) &&
+            v.Ward == ward &&
+            v.Plot == plot);
+        if (fieldMatch != null)
+            return fieldMatch;
+
+        var housingOnlyMatches = config.CloudSavedVenues
+            .Where(v => !string.IsNullOrWhiteSpace(v.Name) &&
+                SameVenueDistrict(v.District, district) &&
+                v.Ward == ward &&
+                v.Plot == plot)
+            .Take(2)
+            .ToList();
+
+        return housingOnlyMatches.Count == 1 ? housingOnlyMatches[0] : null;
+    }
+
+
+    private static bool? PreviewIsSubdivision(PrivateContact profile)
+    {
+        if (profile.ResidentialDetails.Contains("Subdivision", StringComparison.OrdinalIgnoreCase) ||
+            profile.ResidentialDetails.Contains("Subdiv", StringComparison.OrdinalIgnoreCase) ||
+            profile.ResidentialDetails.Contains(" sub", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return null;
     }
 
     private static string BuildPreviewVenueAddress(PrivateContact profile)
@@ -1084,6 +1190,8 @@ internal sealed class MyProfileWindow : Window
         var sanitized = SanitizeFavoriteVenueTag(favoriteVenueTagBuffer);
         if (!string.Equals(sanitized, favoriteVenueTagBuffer, StringComparison.Ordinal))
             favoriteVenueTagBuffer = sanitized;
+        using (ImRaii.PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.62f)))
+        using (ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, 1f * scale))
         if (ImGui.InputTextWithHint("##favorite_venue_tag", "Tooltip tag", ref favoriteVenueTagBuffer, 32))
         {
             favoriteVenueTagBuffer = SanitizeFavoriteVenueTag(favoriteVenueTagBuffer);
@@ -1112,11 +1220,13 @@ internal sealed class MyProfileWindow : Window
         var comboWidth = MathF.Max(170f * scale, ImGui.GetContentRegionAvail().X - 34f * scale);
         ImGui.SetNextItemWidth(comboWidth);
         ImGui.SetNextWindowSize(new Vector2(comboWidth, 226f * scale), ImGuiCond.Always);
-        if (ImGui.BeginCombo("##favorite_venue_picker", string.IsNullOrWhiteSpace(selectedFavoriteVenueName) ? "Select venue" : selectedFavoriteVenueName))
+        if (ThemedWidgets.BeginCombo("##favorite_venue_picker", string.IsNullOrWhiteSpace(selectedFavoriteVenueName) ? "Select venue" : selectedFavoriteVenueName, config.AccentColor))
         {
             ImGui.SetNextItemWidth(-1f);
-            ImGui.InputTextWithHint("##favorite_venue_search", "Search venue name", ref favoriteVenueSearch, 80);
-            ImGui.Separator();
+            using (ImRaii.PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.62f)))
+            using (ImRaii.PushStyle(ImGuiStyleVar.FrameBorderSize, 1f * scale))
+                ImGui.InputTextWithHint("##favorite_venue_search", "Search venue name", ref favoriteVenueSearch, 80);
+            ThemedWidgets.FadeSeparator(config.AccentColor);
 
             using (var child = ImRaii.Child("favorite-venue-picker-scroll", new Vector2(-1f, 168f * scale), false))
             {
@@ -1581,7 +1691,7 @@ internal sealed class MyProfileWindow : Window
         }
 
         ImGui.SameLine();
-        if (ImGui.Button("Save", new Vector2(62f, 0f) * ImGuiHelpers.GlobalScale))
+        if (ThemedWidgets.Button("Save", new Vector2(62f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
         {
             var name = string.IsNullOrWhiteSpace(venueNameBuffer) ? address : venueNameBuffer.Trim();
             var existing = config.CloudSavedVenues.FirstOrDefault(v => string.Equals(v.Address, address, StringComparison.OrdinalIgnoreCase));
@@ -1596,6 +1706,8 @@ internal sealed class MyProfileWindow : Window
                     Ward = selectedWard,
                     Plot = selectedPlot,
                     Address = address,
+                    Source = "Manual",
+                    Favorite = false,
                 });
             }
             else
@@ -1607,6 +1719,8 @@ internal sealed class MyProfileWindow : Window
                 existing.Ward = selectedWard;
                 existing.Plot = selectedPlot;
                 existing.Address = address;
+                if (string.IsNullOrWhiteSpace(existing.Source))
+                    existing.Source = "Manual";
             }
 
             venueNameBuffer = string.Empty;
@@ -1635,7 +1749,7 @@ internal sealed class MyProfileWindow : Window
     private void DrawDataCenterCombo()
     {
         ImGui.SetNextItemWidth(118f * ImGuiHelpers.GlobalScale);
-        if (!ImGui.BeginCombo("##venue_data_center", selectedDataCenter))
+        if (!ThemedWidgets.BeginCombo("##venue_data_center", selectedDataCenter, config.AccentColor))
             return;
 
         foreach (var region in DataCentersByRegion)
@@ -1680,7 +1794,7 @@ internal sealed class MyProfileWindow : Window
 
     private static void DrawStringCombo(string id, ref string current, IReadOnlyList<string> values)
     {
-        if (!ImGui.BeginCombo(id, current))
+        if (!ThemedWidgets.BeginCombo(id, current, UiColors.Accent))
             return;
 
         foreach (var value in values)
@@ -1694,7 +1808,7 @@ internal sealed class MyProfileWindow : Window
 
     private static void DrawNumberCombo(string id, ref int current, int min, int max)
     {
-        if (!ImGui.BeginCombo(id, current.ToString()))
+        if (!ThemedWidgets.BeginCombo(id, current.ToString(), UiColors.Accent))
             return;
 
         for (var i = min; i <= max; i++)

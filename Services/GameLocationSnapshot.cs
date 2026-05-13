@@ -8,5 +8,6 @@ internal sealed class GameLocationSnapshot
     public int Ward { get; init; }
     public int Plot { get; init; }
     public int Room { get; init; }
+    public bool Subdivision { get; init; }
     public bool IsResidential { get; init; }
 }

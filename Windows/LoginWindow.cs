@@ -50,7 +50,7 @@ internal sealed class LoginWindow : Window
         PushColor(ImGuiCol.TextDisabled, UiColors.TextDim);
         PushColor(ImGuiCol.WindowBg, Vector4.Zero);
         PushColor(ImGuiCol.ChildBg, Vector4.Zero);
-        PushColor(ImGuiCol.Border, Vector4.Zero);
+        PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.55f));
         PushColor(ImGuiCol.FrameBg, UiColors.Get("PrivateFrameBg"));
         PushColor(ImGuiCol.FrameBgHovered, UiColors.Get("PrivateFrameBgHovered"));
         PushColor(ImGuiCol.FrameBgActive, UiColors.Get("PrivateFrameBgActive"));
@@ -72,7 +72,8 @@ internal sealed class LoginWindow : Window
         PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(6f, 6f) * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.WindowRounding, 7f * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.ChildRounding, 4f * ImGuiHelpers.GlobalScale);
-        PushStyleVar(ImGuiStyleVar.FrameRounding, 4f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameRounding, 5f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f * ImGuiHelpers.GlobalScale);
     }
 
     public override void PostDraw()
@@ -85,7 +86,8 @@ internal sealed class LoginWindow : Window
     {
         
         WindowEdgeFade.DrawUnified(config.WindowBackgroundColor, config.AccentColor);
-DrawHeader();
+        HeaderDecor.DrawBackgroundOverlay(ImGui.GetWindowDrawList(), ImGui.GetWindowPos(), ImGui.GetWindowSize(), config.WindowBackgroundColor, config.AccentColor);
+        DrawHeader();
 
         using var body = ImRaii.Child("login-body", new Vector2(-1f, -1f), false);
         if (!body) return;
@@ -99,7 +101,7 @@ DrawHeader();
             ImGui.TextWrapped($"You are logged in as: {character}");
             ImGui.Spacing();
 
-            if (ImGui.Button("Log Off", new Vector2(120f, 0f) * ImGuiHelpers.GlobalScale))
+            if (ThemedWidgets.Button("Log Off", new Vector2(120f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
             {
                 cloudService.Logout();
                 statusMessage = "Logged out.";
@@ -114,7 +116,7 @@ DrawHeader();
         using (ImRaii.Disabled(busy || !cloudService.HasApiBaseUrl))
         {
             DrawEmailPassword();
-            ImGui.Separator();
+            ThemedWidgets.FadeSeparator(config.AccentColor);
             DrawDiscordLogin();
         }
 
@@ -129,20 +131,7 @@ DrawHeader();
         var width = ImGui.GetContentRegionAvail().X;
         var scale = ImGuiHelpers.GlobalScale;
         var headerHeight = 58f * scale;
-        var top = new Vector4(
-            MathF.Min(1f, config.WindowBackgroundColor.X + 0.028f),
-            MathF.Min(1f, config.WindowBackgroundColor.Y + 0.028f),
-            MathF.Min(1f, config.WindowBackgroundColor.Z + 0.028f),
-            MathF.Min(1f, MathF.Max(0.38f, config.WindowBackgroundColor.W)));
-        var bottom = new Vector4(config.WindowBackgroundColor.X, config.WindowBackgroundColor.Y, config.WindowBackgroundColor.Z, 0f);
-
-        drawList.AddRectFilledMultiColor(
-            pos,
-            pos + new Vector2(width, headerHeight),
-            ImGui.GetColorU32(top),
-            ImGui.GetColorU32(top),
-            ImGui.GetColorU32(bottom),
-            ImGui.GetColorU32(bottom));
+        HeaderDecor.Draw(drawList, pos, width, headerHeight, config.WindowBackgroundColor, config.AccentColor);
 
         DrawTextWithShadow(drawList, pos + new Vector2(20f, 13f) * scale, ImGui.GetColorU32(config.AccentColor), "Log In / Log Off", 20f * scale);
         ImGui.Dummy(new Vector2(width, headerHeight));
@@ -165,24 +154,24 @@ DrawHeader();
         ImGui.InputTextWithHint("##cloud_password", "Password", ref password, 128, flags);
         ImGui.Checkbox("Show password", ref showPassword);
 
-        if (ImGui.Button("Login", new Vector2(92f, 0f) * ImGuiHelpers.GlobalScale))
+        if (ThemedWidgets.Button("Login", new Vector2(92f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
             RunCloudAction(() => cloudService.LoginWithUsernameAsync(username, password));
 
         ImGui.SameLine();
-        if (ImGui.Button("Create account", new Vector2(138f, 0f) * ImGuiHelpers.GlobalScale))
+        if (ThemedWidgets.Button("Create account", new Vector2(138f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
             RunCloudAction(() => cloudService.RegisterWithUsernameAsync(username, password));
     }
 
     private void DrawDiscordLogin()
     {
         ImGui.TextColored(config.AccentColor, "Discord");
-        if (ImGui.Button("Open Discord login", new Vector2(170f, 0f) * ImGuiHelpers.GlobalScale))
+        if (ThemedWidgets.Button("Open Discord login", new Vector2(170f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
             statusMessage = cloudService.OpenDiscordLogin();
 
         ImGui.SetNextItemWidth(-1f);
         ImGui.InputTextWithHint("##discord_code", "Paste Discord login code here", ref discordCode, 256);
 
-        if (ImGui.Button("Complete Discord login", new Vector2(190f, 0f) * ImGuiHelpers.GlobalScale))
+        if (ThemedWidgets.Button("Complete Discord login", new Vector2(190f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
             RunCloudAction(() => cloudService.CompleteDiscordLoginAsync(discordCode));
     }
 

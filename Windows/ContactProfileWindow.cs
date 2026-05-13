@@ -86,7 +86,7 @@ internal sealed class ContactProfileWindow : Window
         PushColor(ImGuiCol.WindowBg, Vector4.Zero);
         PushColor(ImGuiCol.ChildBg, Vector4.Zero);
         PushColor(ImGuiCol.PopupBg, UiColors.Get("PrivatePopupBg"));
-        PushColor(ImGuiCol.Border, Vector4.Zero);
+        PushColor(ImGuiCol.Border, UiColors.WithAlpha(config.AccentColor, 0.55f));
         PushColor(ImGuiCol.FrameBg, UiColors.Get("PrivateFrameBg"));
         PushColor(ImGuiCol.FrameBgHovered, UiColors.Get("PrivateFrameBgHovered"));
         PushColor(ImGuiCol.FrameBgActive, UiColors.Get("PrivateFrameBgActive"));
@@ -107,7 +107,8 @@ internal sealed class ContactProfileWindow : Window
         PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(6f, 6f) * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.WindowRounding, 7f * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.ChildRounding, 4f * ImGuiHelpers.GlobalScale);
-        PushStyleVar(ImGuiStyleVar.FrameRounding, 4f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameRounding, 5f * ImGuiHelpers.GlobalScale);
+        PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f * ImGuiHelpers.GlobalScale);
     }
 
     public override void PostDraw()
@@ -141,7 +142,7 @@ var drawList = ImGui.GetWindowDrawList();
 
         ImGui.TextColored(config.AccentColor, $"{contact.Name}@{contact.World}");
         ImGui.TextDisabled("Private profile fields only affect the plugin display.");
-        ImGui.Separator();
+        ThemedWidgets.FadeSeparator(config.AccentColor);
 
         ImGui.SetNextItemWidth(-1f);
         ImGui.InputTextWithHint("##nickname", "Nickname shown in the list", ref nickname, 64);
@@ -161,19 +162,19 @@ var drawList = ImGui.GetWindowDrawList();
         ImGui.InputTextWithHint("##content", "Preferred content", ref preferredContent, 96);
 
         ImGui.SetNextItemWidth(190f * ImGuiHelpers.GlobalScale);
-        ImGui.Combo("Private status", ref relationshipIndex, RelationshipModes, RelationshipModes.Length);
+        ThemedWidgets.Combo("Private status", ref relationshipIndex, RelationshipModes, RelationshipModes.Length, config.AccentColor);
         if (RelationshipModes[Math.Clamp(relationshipIndex, 0, RelationshipModes.Length - 1)] is "Avoid")
             ImGui.TextColored(new Vector4(1f, 0.48f, 0.42f, 1f), "Avoid contacts are sorted to the bottom and action buttons are hidden.");
 
         ImGui.TextColored(config.AccentColor, "Mini bio");
         ImGui.InputTextMultiline("##bio", ref profileBio, 2048, new Vector2(-1f, 82f * ImGuiHelpers.GlobalScale));
 
-        if (ImGui.Button("Save", new Vector2(100f, 0f) * ImGuiHelpers.GlobalScale))
+        if (ThemedWidgets.Button("Save", new Vector2(100f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
         {
             Save();
         }
         ImGui.SameLine();
-        if (ImGui.Button("Clear Profile", new Vector2(120f, 0f) * ImGuiHelpers.GlobalScale))
+        if (ThemedWidgets.Button("Clear Profile", new Vector2(120f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
         {
             nickname = symbol = mainJob = role = nameday = preferredContent = profileBio = string.Empty;
             symbolColorHex = "#2BE5B5";
@@ -183,10 +184,10 @@ var drawList = ImGui.GetWindowDrawList();
             Save();
         }
         ImGui.SameLine();
-        if (ImGui.Button("Close", new Vector2(100f, 0f) * ImGuiHelpers.GlobalScale))
+        if (ThemedWidgets.Button("Close", new Vector2(100f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
             IsOpen = false;
 
-        ImGui.Separator();
+        ThemedWidgets.FadeSeparator(config.AccentColor);
         DrawRecentHistory();
     }
 
@@ -213,7 +214,7 @@ var drawList = ImGui.GetWindowDrawList();
             ImGui.TextDisabled($"{time}  {item.Message}");
         }
 
-        if (ImGui.Button("Clear History", new Vector2(120f, 0f) * ImGuiHelpers.GlobalScale))
+        if (ThemedWidgets.Button("Clear History", new Vector2(120f, 0f) * ImGuiHelpers.GlobalScale, config.AccentColor))
         {
             config.History.RemoveAll(e => string.Equals(e.ContactId, contact.Id, StringComparison.Ordinal));
             config.Save();
@@ -246,7 +247,7 @@ var drawList = ImGui.GetWindowDrawList();
         ImGui.SetNextWindowSize(new Vector2(232f, 220f) * scale, ImGuiCond.Always);
 
         var preview = string.IsNullOrWhiteSpace(symbol) ? "None" : symbol;
-        if (!ImGui.BeginCombo("Symbol", preview, ImGuiComboFlags.HeightLargest))
+        if (!ThemedWidgets.BeginCombo("Symbol", preview, config.AccentColor, ImGuiComboFlags.HeightLargest))
             return;
 
         var buttonSize = new Vector2(43f, 25f) * scale;
@@ -269,7 +270,7 @@ var drawList = ImGui.GetWindowDrawList();
                     using var hoveredColor = ImRaii.PushColor(ImGuiCol.ButtonHovered, UiColors.WithAlpha(config.AccentColor, 0.24f));
                     using var activeColor = ImRaii.PushColor(ImGuiCol.ButtonActive, UiColors.WithAlpha(config.AccentColor, 0.36f));
 
-                    if (ImGui.Button(label, buttonSize))
+                    if (ThemedWidgets.Button(label, buttonSize, config.AccentColor))
                     {
                         symbolIndex = i;
                         symbol = value;

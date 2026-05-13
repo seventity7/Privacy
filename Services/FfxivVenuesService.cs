@@ -29,6 +29,8 @@ internal sealed class FfxivVenuesService : IDisposable
     private readonly HttpClient http = new();
     private readonly object gate = new();
     private List<FfxivVenueEntry> venues = new();
+    private readonly Dictionary<string, FfxivVenueEntry?> addressLookupCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> pendingAddressLookups = new(StringComparer.OrdinalIgnoreCase);
     private DateTime lastFetchUtc = DateTime.MinValue;
     private DateTime lastRefreshAttemptUtc = DateTime.MinValue;
     private bool fetching;
@@ -37,7 +39,7 @@ internal sealed class FfxivVenuesService : IDisposable
     {
         this.pluginInterface = pluginInterface;
         this.log = log;
-        http.Timeout = TimeSpan.FromSeconds(20);
+        http.Timeout = TimeSpan.FromSeconds(60);
         http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Privacy-Dalamud/1.0");
         LoadCache();
     }
@@ -52,6 +54,9 @@ internal sealed class FfxivVenuesService : IDisposable
     }
 
     public void EnsureFreshAsync(bool force = false)
+        => _ = RefreshAsync(force, CancellationToken.None);
+
+    public async Task RefreshAsync(bool force = false, CancellationToken cancellationToken = default)
     {
         var now = DateTime.UtcNow;
         lock (gate)
@@ -69,33 +74,35 @@ internal sealed class FfxivVenuesService : IDisposable
             lastRefreshAttemptUtc = now;
         }
 
-        _ = Task.Run(async () =>
+        try
         {
-            try
-            {
-                var fetched = await FetchAsync(CancellationToken.None).ConfigureAwait(false);
-                if (fetched.Count == 0)
-                    return;
+            var fetched = await FetchAsync(cancellationToken).ConfigureAwait(false);
+            if (fetched.Count == 0)
+                return;
 
-                lock (gate)
-                {
-                    venues = fetched;
-                    lastFetchUtc = DateTime.UtcNow;
-                }
+            lock (gate)
+            {
+                venues = fetched;
+                addressLookupCache.Clear();
+                lastFetchUtc = DateTime.UtcNow;
+            }
 
-                SaveCache(fetched);
-                log.Debug("Privacy: loaded {Count} North America venues from FFXIV Venues.", fetched.Count);
-            }
-            catch (Exception ex)
-            {
-                log.Debug(ex, "Privacy: failed to refresh FFXIV Venues catalog.");
-            }
-            finally
-            {
-                lock (gate)
-                    fetching = false;
-            }
-        });
+            SaveCache(fetched);
+            log.Debug("Privacy: loaded {Count} North America venues from FFXIV Venues.", fetched.Count);
+        }
+        catch (OperationCanceledException)
+        {
+            log.Debug("Privacy: FFXIV Venues catalog refresh timed out; cached venues will stay in use.");
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "Privacy: failed to refresh FFXIV Venues catalog.");
+        }
+        finally
+        {
+            lock (gate)
+                fetching = false;
+        }
     }
 
     public List<FfxivVenueEntry> Search(string text, int limit = 80)
@@ -159,21 +166,167 @@ internal sealed class FfxivVenuesService : IDisposable
     }
 
 
-    public FfxivVenueEntry? FindByAddress(string dataCenter, string world, string district, int ward, int plot)
+    public FfxivVenueEntry? FindByAddress(string dataCenter, string world, string district, int ward, int plot, bool? subdivision = null)
     {
         EnsureFreshAsync();
 
-        if (string.IsNullOrWhiteSpace(world) || string.IsNullOrWhiteSpace(district) || ward <= 0 || plot <= 0)
+        if (string.IsNullOrWhiteSpace(district) || ward <= 0 || plot <= 0)
             return null;
 
+        var immediate = FindByAddressInMemory(dataCenter, world, district, ward, plot, subdivision);
+        if (immediate != null)
+            return immediate;
+
+        var lookupKeys = BuildAddressLookupRequests(dataCenter, world, district, ward, plot, subdivision).ToList();
         lock (gate)
         {
-            return venues.FirstOrDefault(v =>
-                string.Equals(v.DataCenter, dataCenter, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(v.World, world, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(NormalizeDistrict(v.District), NormalizeDistrict(district), StringComparison.OrdinalIgnoreCase) &&
-                v.Ward == ward && v.Plot == plot);
+            foreach (var request in lookupKeys)
+            {
+                if (addressLookupCache.TryGetValue(request.Key, out var cached) && cached != null)
+                    return cached;
+            }
         }
+
+        foreach (var request in lookupKeys)
+            QueueAddressLookup(request);
+
+        return null;
+    }
+
+    private FfxivVenueEntry? FindByAddressInMemory(string dataCenter, string world, string district, int ward, int plot, bool? subdivision)
+    {
+        lock (gate)
+            return FindByAddressInList(venues, dataCenter, world, district, ward, plot, subdivision);
+    }
+
+    private static FfxivVenueEntry? FindByAddressInList(IEnumerable<FfxivVenueEntry> source, string dataCenter, string world, string district, int ward, int plot, bool? subdivision)
+    {
+        var matches = source.Where(v =>
+            string.Equals(NormalizeDistrict(v.District), NormalizeDistrict(district), StringComparison.OrdinalIgnoreCase) &&
+            v.Ward == ward &&
+            v.Plot == plot &&
+            (!subdivision.HasValue || v.Subdivision == subdivision.Value))
+            .ToList();
+
+        var exact = matches.FirstOrDefault(v =>
+            string.Equals(v.DataCenter, dataCenter, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(v.World, world, StringComparison.OrdinalIgnoreCase));
+        if (exact != null)
+            return exact;
+
+        var worldMatches = matches
+            .Where(v => string.Equals(v.World, world, StringComparison.OrdinalIgnoreCase))
+            .Take(2)
+            .ToList();
+        if (worldMatches.Count == 1)
+            return worldMatches[0];
+
+        var dataCenterMatches = matches
+            .Where(v => string.Equals(v.DataCenter, dataCenter, StringComparison.OrdinalIgnoreCase))
+            .Take(2)
+            .ToList();
+        if (dataCenterMatches.Count == 1)
+            return dataCenterMatches[0];
+
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
+    private void QueueAddressLookup(AddressLookupRequest request)
+    {
+        lock (gate)
+        {
+            if (addressLookupCache.ContainsKey(request.Key) || pendingAddressLookups.Contains(request.Key))
+                return;
+
+            pendingAddressLookups.Add(request.Key);
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var fetched = await FetchByAddressAsync(request, CancellationToken.None).ConfigureAwait(false);
+                lock (gate)
+                {
+                    addressLookupCache[request.Key] = fetched;
+                    if (fetched != null && !venues.Any(v => string.Equals(BuildDedupeKey(v), BuildDedupeKey(fetched), StringComparison.OrdinalIgnoreCase)))
+                        venues.Add(fetched);
+                }
+
+                if (fetched != null)
+                    log.Debug("Privacy: resolved FFXIV Venue by address {AddressKey}: {VenueName}", request.Key, fetched.Name);
+            }
+            catch (Exception ex)
+            {
+                log.Debug(ex, "Privacy: failed to resolve FFXIV Venue by address {AddressKey}.", request.Key);
+            }
+            finally
+            {
+                lock (gate)
+                    pendingAddressLookups.Remove(request.Key);
+            }
+        });
+    }
+
+    private async Task<FfxivVenueEntry?> FetchByAddressAsync(AddressLookupRequest request, CancellationToken cancellationToken)
+    {
+        var url = BuildAddressLookupUrl(request);
+        using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+            return null;
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        var matches = new List<FfxivVenueEntry>();
+        foreach (var item in EnumerateVenueElements(document.RootElement))
+        {
+            var entry = ParseVenue(item);
+            if (entry != null)
+                matches.Add(entry);
+        }
+
+        return FindByAddressInList(matches, request.DataCenter, request.World, request.District, request.Ward, request.Plot, request.Subdivision)
+            ?? matches.FirstOrDefault(v => string.Equals(v.World, request.World, StringComparison.OrdinalIgnoreCase))
+            ?? matches.FirstOrDefault();
+    }
+
+    private static string BuildAddressLookupUrl(AddressLookupRequest request)
+    {
+        var parameters = new List<string>();
+        AddQuery(parameters, "DataCenter", request.DataCenter);
+        AddQuery(parameters, "World", request.World);
+        AddQuery(parameters, "District", request.District);
+        if (request.Ward > 0) parameters.Add($"Ward={request.Ward}");
+        if (request.Plot > 0) parameters.Add($"Plot={request.Plot}");
+        if (request.Subdivision.HasValue) parameters.Add($"Subdivision={request.Subdivision.Value.ToString().ToLowerInvariant()}");
+        parameters.Add("Approved=true");
+        return ApiUrl + "?" + string.Join("&", parameters);
+    }
+
+    private static void AddQuery(List<string> parameters, string name, string value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+            parameters.Add($"{name}={Uri.EscapeDataString(value.Trim())}");
+    }
+
+    private static IEnumerable<AddressLookupRequest> BuildAddressLookupRequests(string dataCenter, string world, string district, int ward, int plot, bool? subdivision)
+    {
+        yield return new AddressLookupRequest(dataCenter, world, NormalizeDistrict(district), ward, plot, subdivision);
+
+        if (subdivision == true && plot is > 0 and <= 30)
+            yield return new AddressLookupRequest(dataCenter, world, NormalizeDistrict(district), ward, plot + 30, true);
+
+        if (plot > 30)
+            yield return new AddressLookupRequest(dataCenter, world, NormalizeDistrict(district), ward, plot - 30, true);
+
+        if (subdivision.HasValue)
+            yield return new AddressLookupRequest(dataCenter, world, NormalizeDistrict(district), ward, plot, null);
+    }
+
+    private readonly record struct AddressLookupRequest(string DataCenter, string World, string District, int Ward, int Plot, bool? Subdivision)
+    {
+        public string Key => $"{DataCenter}|{World}|{FfxivVenuesService.NormalizeDistrict(District)}|{Ward}|{Plot}|{Subdivision?.ToString() ?? "any"}";
     }
 
     public static PrivateVenueBookmark ToBookmark(FfxivVenueEntry entry, bool favorite = false)
@@ -196,17 +349,15 @@ internal sealed class FfxivVenuesService : IDisposable
 
     private async Task<List<FfxivVenueEntry>> FetchAsync(CancellationToken cancellationToken)
     {
-        using var response = await http.GetAsync(ApiUrl, cancellationToken).ConfigureAwait(false);
+        using var response = await http.GetAsync(ApiUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
             return new List<FfxivVenueEntry>();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (document.RootElement.ValueKind != JsonValueKind.Array)
-            return new List<FfxivVenueEntry>();
 
         var dedupe = new Dictionary<string, FfxivVenueEntry>(StringComparer.OrdinalIgnoreCase);
-        foreach (var item in document.RootElement.EnumerateArray())
+        foreach (var item in EnumerateVenueElements(document.RootElement))
         {
             var entry = ParseVenue(item);
             if (entry == null)
@@ -220,13 +371,39 @@ internal sealed class FfxivVenuesService : IDisposable
         return dedupe.Values.OrderBy(v => v.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
+    private static IEnumerable<JsonElement> EnumerateVenueElements(JsonElement root)
+    {
+        if (root.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in root.EnumerateArray())
+                yield return item;
+            yield break;
+        }
+
+        if (root.ValueKind != JsonValueKind.Object)
+            yield break;
+
+        foreach (var propertyName in new[] { "venues", "items", "results", "data" })
+        {
+            if (!TryGetProperty(root, propertyName, out var collection) || collection.ValueKind != JsonValueKind.Array)
+                continue;
+
+            foreach (var item in collection.EnumerateArray())
+                yield return item;
+            yield break;
+        }
+
+        if (TryGetProperty(root, "name", out _) && TryGetProperty(root, "location", out _))
+            yield return root;
+    }
+
     private static FfxivVenueEntry? ParseVenue(JsonElement item)
     {
         var name = ReadString(item, "name").Trim();
         if (string.IsNullOrWhiteSpace(name) || name.Equals("Not a venue", StringComparison.OrdinalIgnoreCase))
             return null;
 
-        if (!item.TryGetProperty("location", out var loc) || loc.ValueKind != JsonValueKind.Object)
+        if (!TryGetProperty(item, "location", out var loc) || loc.ValueKind != JsonValueKind.Object)
             return null;
 
         var dataCenter = ReadString(loc, "dataCenter");
@@ -350,7 +527,7 @@ internal sealed class FfxivVenuesService : IDisposable
             return explicitState;
 
         var now = DateTimeOffset.UtcNow;
-        if (item.TryGetProperty("scheduleOverrides", out var overridesElement) && overridesElement.ValueKind == JsonValueKind.Array)
+        if (TryGetProperty(item, "scheduleOverrides", out var overridesElement) && overridesElement.ValueKind == JsonValueKind.Array)
         {
             foreach (var overrideItem in overridesElement.EnumerateArray())
             {
@@ -365,11 +542,11 @@ internal sealed class FfxivVenuesService : IDisposable
             }
         }
 
-        if (item.TryGetProperty("schedule", out var schedules) && schedules.ValueKind == JsonValueKind.Array)
+        if (TryGetProperty(item, "schedule", out var schedules) && schedules.ValueKind == JsonValueKind.Array)
         {
             foreach (var schedule in schedules.EnumerateArray())
             {
-                if (!schedule.TryGetProperty("resolution", out var resolution) || resolution.ValueKind != JsonValueKind.Object)
+                if (!TryGetProperty(schedule, "resolution", out var resolution) || resolution.ValueKind != JsonValueKind.Object)
                     continue;
 
                 if (IsWithinRange(now, ReadString(resolution, "start"), ReadString(resolution, "end")))
@@ -396,7 +573,7 @@ internal sealed class FfxivVenuesService : IDisposable
     {
         foreach (var key in new[] { "isOpenNow", "openNow", "currentlyOpen", "isOpen", "open" })
         {
-            if (!item.TryGetProperty(key, out var value) || value.ValueKind == JsonValueKind.Null)
+            if (!TryGetProperty(item, key, out var value) || value.ValueKind == JsonValueKind.Null)
                 continue;
 
             if (value.ValueKind == JsonValueKind.True)
@@ -468,11 +645,11 @@ internal sealed class FfxivVenuesService : IDisposable
     private static void CollectScheduleRanges(JsonElement item, List<(DateTimeOffset Start, DateTimeOffset? End)> ranges)
     {
         var cutoff = DateTimeOffset.UtcNow.AddHours(-12);
-        if (item.TryGetProperty("schedule", out var schedules) && schedules.ValueKind == JsonValueKind.Array)
+        if (TryGetProperty(item, "schedule", out var schedules) && schedules.ValueKind == JsonValueKind.Array)
         {
             foreach (var schedule in schedules.EnumerateArray())
             {
-                if (!schedule.TryGetProperty("resolution", out var resolution) || resolution.ValueKind != JsonValueKind.Object)
+                if (!TryGetProperty(schedule, "resolution", out var resolution) || resolution.ValueKind != JsonValueKind.Object)
                     continue;
                 var startText = ReadString(resolution, "start");
                 if (!DateTimeOffset.TryParse(startText, out var start) || start < cutoff)
@@ -483,7 +660,7 @@ internal sealed class FfxivVenuesService : IDisposable
             }
         }
 
-        if (item.TryGetProperty("scheduleOverrides", out var overridesElement) && overridesElement.ValueKind == JsonValueKind.Array)
+        if (TryGetProperty(item, "scheduleOverrides", out var overridesElement) && overridesElement.ValueKind == JsonValueKind.Array)
         {
             foreach (var overrideItem in overridesElement.EnumerateArray())
             {
@@ -532,11 +709,11 @@ internal sealed class FfxivVenuesService : IDisposable
         end = null;
         var found = false;
 
-        if (item.TryGetProperty("schedule", out var schedules) && schedules.ValueKind == JsonValueKind.Array)
+        if (TryGetProperty(item, "schedule", out var schedules) && schedules.ValueKind == JsonValueKind.Array)
         {
             foreach (var schedule in schedules.EnumerateArray())
             {
-                if (!schedule.TryGetProperty("resolution", out var resolution) || resolution.ValueKind != JsonValueKind.Object)
+                if (!TryGetProperty(schedule, "resolution", out var resolution) || resolution.ValueKind != JsonValueKind.Object)
                     continue;
                 var startText = ReadString(resolution, "start");
                 if (!DateTimeOffset.TryParse(startText, out var candidateStart))
@@ -553,7 +730,7 @@ internal sealed class FfxivVenuesService : IDisposable
             }
         }
 
-        if (item.TryGetProperty("scheduleOverrides", out var overridesElement) && overridesElement.ValueKind == JsonValueKind.Array)
+        if (TryGetProperty(item, "scheduleOverrides", out var overridesElement) && overridesElement.ValueKind == JsonValueKind.Array)
         {
             foreach (var overrideItem in overridesElement.EnumerateArray())
             {
@@ -592,7 +769,7 @@ internal sealed class FfxivVenuesService : IDisposable
         return text;
     }
 
-    private string CachePath => Path.Combine(pluginInterface.ConfigDirectory.FullName, "ffxivvenues_na_cache_v4.json");
+    private string CachePath => Path.Combine(pluginInterface.ConfigDirectory.FullName, "ffxivvenues_na_cache_v5.json");
 
     private void LoadCache()
     {
@@ -637,9 +814,30 @@ internal sealed class FfxivVenuesService : IDisposable
         }
     }
 
+    private static bool TryGetProperty(JsonElement element, string property, out JsonElement value)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (element.TryGetProperty(property, out value))
+                return true;
+
+            foreach (var candidate in element.EnumerateObject())
+            {
+                if (string.Equals(candidate.Name, property, StringComparison.OrdinalIgnoreCase))
+                {
+                    value = candidate.Value;
+                    return true;
+                }
+            }
+        }
+
+        value = default;
+        return false;
+    }
+
     private static string ReadFlexibleUrl(JsonElement element, string property)
     {
-        if (!element.TryGetProperty(property, out var value) || value.ValueKind == JsonValueKind.Null)
+        if (!TryGetProperty(element, property, out var value) || value.ValueKind == JsonValueKind.Null)
             return string.Empty;
 
         if (value.ValueKind == JsonValueKind.String)
@@ -682,7 +880,7 @@ internal sealed class FfxivVenuesService : IDisposable
 
     private static string ReadNestedString(JsonElement element, string parent, string child)
     {
-        if (!element.TryGetProperty(parent, out var container) || container.ValueKind == JsonValueKind.Null)
+        if (!TryGetProperty(element, parent, out var container) || container.ValueKind == JsonValueKind.Null)
             return string.Empty;
 
         if (container.ValueKind == JsonValueKind.Object)
@@ -712,11 +910,11 @@ internal sealed class FfxivVenuesService : IDisposable
     }
 
     private static string ReadString(JsonElement element, string property)
-        => element.TryGetProperty(property, out var value) && value.ValueKind != JsonValueKind.Null ? value.ToString() ?? string.Empty : string.Empty;
+        => TryGetProperty(element, property, out var value) && value.ValueKind != JsonValueKind.Null ? value.ToString() ?? string.Empty : string.Empty;
 
     private static int ReadInt(JsonElement element, string property)
     {
-        if (!element.TryGetProperty(property, out var value))
+        if (!TryGetProperty(element, property, out var value))
             return 0;
         if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number))
             return number;
@@ -725,7 +923,7 @@ internal sealed class FfxivVenuesService : IDisposable
 
     private static bool ReadBool(JsonElement element, string property)
     {
-        if (!element.TryGetProperty(property, out var value))
+        if (!TryGetProperty(element, property, out var value))
             return false;
         if (value.ValueKind == JsonValueKind.True) return true;
         if (value.ValueKind == JsonValueKind.False) return false;
