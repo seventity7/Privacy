@@ -1,18 +1,27 @@
-using System;
-using System.Linq;
 using System.Reflection;
 
 namespace Privacy;
 
 internal static class BuildSettings
 {
-    public static string CloudApiBaseUrl { get; } = ReadMetadata("PrivacyCloudApiBaseUrl");
+    public static string CloudApiBaseUrl { get; } = LoadCloudApiBaseUrl();
 
-    private static string ReadMetadata(string key)
+    private static string LoadCloudApiBaseUrl()
     {
-        return Assembly.GetExecutingAssembly()
-            .GetCustomAttributes<AssemblyMetadataAttribute>()
-            .FirstOrDefault(attribute => string.Equals(attribute.Key, key, StringComparison.Ordinal))
-            ?.Value ?? string.Empty;
+        try
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            foreach (var attribute in assembly.GetCustomAttributes<AssemblyMetadataAttribute>())
+            {
+                if (string.Equals(attribute.Key, "PrivacyCloudApiBaseUrl", StringComparison.Ordinal) &&
+                    !string.IsNullOrWhiteSpace(attribute.Value))
+                    return attribute.Value.Trim();
+            }
+        }
+        catch
+        {
+        }
+
+        return string.Empty;
     }
 }
