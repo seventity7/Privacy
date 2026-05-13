@@ -32,6 +32,9 @@ internal static class WindowEdgeFade
     }
 
     public static void DrawUnified(Vector4 color, Vector4 borderColor, Vector4 headerTop, Vector4 headerBottom, float headerHeight)
+        => DrawUnified(color, borderColor, headerTop, headerBottom, headerHeight, BorderThickness * ImGuiHelpers.GlobalScale);
+
+    public static void DrawUnified(Vector4 color, Vector4 borderColor, Vector4 headerTop, Vector4 headerBottom, float headerHeight, float borderThickness)
     {
         var drawList = ImGui.GetWindowDrawList();
         var windowPos = ImGui.GetWindowPos();
@@ -45,7 +48,7 @@ internal static class WindowEdgeFade
         var titleBottomY = windowPos.Y + ImGui.GetFrameHeight();
         var outerMin = new Vector2(windowPos.X, titleBottomY);
         var outerMax = new Vector2(windowPos.X + windowSize.X, windowPos.Y + windowSize.Y);
-        var thickness = BorderThickness * scale;
+        var thickness = MathF.Max(0f, borderThickness);
 
         var panelMin = new Vector2(windowPos.X + thickness, titleBottomY);
         var panelMax = new Vector2(windowPos.X + windowSize.X - thickness, outerMax.Y);

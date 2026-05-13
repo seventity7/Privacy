@@ -8,6 +8,8 @@ using Dalamud.Interface.Windowing;
 using Privacy.Models;
 using Privacy.Services;
 using Privacy.UI;
+using Lumina.Excel.Sheets;
+using System.Reflection;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -639,9 +641,14 @@ internal sealed class MyProfileWindow : Window
             displayName = "Your profile";
 
         var name = string.IsNullOrWhiteSpace(config.CloudLinkedCharacterName) ? displayName : config.CloudLinkedCharacterName;
-        var world = config.CloudLinkedWorld;
-        var dataCenter = ResolveDataCenterForWorld(world);
-        var location = BuildPreviewLocationLine(out var residentialDetails);
+        var currentWorldId = ResolveLocalCurrentWorldId();
+        var world = ResolveWorldName(currentWorldId);
+        if (string.IsNullOrWhiteSpace(world))
+            world = config.CloudLinkedWorld;
+        var dataCenter = ResolveDataCenterName(currentWorldId);
+        if (string.IsNullOrWhiteSpace(dataCenter))
+            dataCenter = ResolveDataCenterForWorld(world);
+        var location = BuildPreviewLocationLine(world, dataCenter, out var residentialDetails);
 
         return new PrivateContact
         {
@@ -776,12 +783,185 @@ internal sealed class MyProfileWindow : Window
         var statusColor = GetStatusColor(profile.Status);
 
         drawList.PushClipRect(textMin - new Vector2(1f, 1f) * scale, textMax, true);
-        ProfileNameEffects.DrawEffectText(drawList, textMin, TrimToWidth(displayName, textWidth, 15.2f * scale), profile.CloudDisplayNameEffect, palette.Title, 15.2f * scale, scale);
+        var displayFontSize = 15.2f * scale;
+        var previewVenueName = ResolvePreviewVenueName(profile);
+        var venueBadgeText = string.IsNullOrWhiteSpace(previewVenueName) || profile.Status == ContactStatus.Offline ? string.Empty : $"@At {previewVenueName}";
+        var venueBadgeFontSize = 12.6f * scale;
+        var rawBadgeWidth = string.IsNullOrWhiteSpace(venueBadgeText)
+            ? 0f
+            : ImGui.CalcTextSize(venueBadgeText).X * (venueBadgeFontSize / MathF.Max(1f, ImGui.GetFontSize())) + 10f * scale;
+        var venueBadgeWidth = string.IsNullOrWhiteSpace(venueBadgeText)
+            ? 0f
+            : MathF.Min(MathF.Max(rawBadgeWidth, 72f * scale), textWidth * 0.48f);
+        var displayVisible = TrimToWidth(displayName, MathF.Max(24f * scale, textWidth - venueBadgeWidth), displayFontSize);
+        ProfileNameEffects.DrawEffectText(drawList, textMin, displayVisible, profile.CloudDisplayNameEffect, palette.Title, displayFontSize, scale);
+        DrawPreviewVenueBadgeBesideName(drawList, textMin, displayVisible, textWidth, palette, scale, venueBadgeText);
         DrawTextWithShadow(drawList, textMin + new Vector2(0f, 24f) * scale, ImGui.GetColorU32(palette.Subtitle), TrimToWidth(identity, textWidth, 13.3f * scale), 13.3f * scale);
         DrawTextWithShadow(drawList, textMin + new Vector2(0f, 48f) * scale, ImGui.GetColorU32(statusColor), statusText, 13.3f * scale);
         drawList.PopClipRect();
 
         ImGui.Dummy(new Vector2(contentWidth, size.Y + 8f * scale));
+    }
+
+
+    private void DrawPreviewVenueBadgeBesideName(ImDrawListPtr drawList, Vector2 namePos, string visibleName, float textWidth, ProfileVisuals.ThemePalette palette, float scale, string venueBadgeText)
+    {
+        if (string.IsNullOrWhiteSpace(venueBadgeText))
+            return;
+
+        var fontSize = 12.6f * scale;
+        var nameWidth = ImGui.CalcTextSize(visibleName).X * (15.2f * scale / MathF.Max(1f, ImGui.GetFontSize()));
+        var badgePos = namePos + new Vector2(nameWidth + 8f * scale, 2.2f * scale);
+        var available = MathF.Max(0f, textWidth - nameWidth - 10f * scale);
+        if (available < 24f * scale)
+            available = MathF.Max(24f * scale, textWidth * 0.40f);
+
+        var text = TrimToWidth(venueBadgeText, available, fontSize);
+        DrawTextWithShadow(drawList, badgePos, ImGui.GetColorU32(UiColors.WithAlpha(palette.Accent, 0.88f)), text, fontSize);
+    }
+
+    private string ResolvePreviewVenueName(PrivateContact profile)
+    {
+        var dataCenter = string.IsNullOrWhiteSpace(profile.CurrentDataCenter) ? profile.DataCenter : profile.CurrentDataCenter;
+        var world = string.IsNullOrWhiteSpace(profile.CurrentWorld) ? profile.World : profile.CurrentWorld;
+        var district = ResolvePreviewResidentialDistrict(profile);
+        var wardText = ExtractPreviewHousingNumber(profile.ResidentialDetails, "Ward", "w");
+        var plotText = ExtractPreviewHousingNumber(profile.ResidentialDetails, "Plot", "p");
+        var ward = 0;
+        var plot = 0;
+        var hasHousingParts = int.TryParse(wardText, out ward) && int.TryParse(plotText, out plot);
+
+        if (hasHousingParts)
+        {
+            var fieldMatch = config.CloudSavedVenues.FirstOrDefault(v =>
+                !string.IsNullOrWhiteSpace(v.Name) &&
+                VenueFieldMatches(v.DataCenter, dataCenter) &&
+                VenueFieldMatches(v.World, world) &&
+                SameVenueDistrict(v.District, district) &&
+                v.Ward == ward &&
+                v.Plot == plot);
+            if (fieldMatch != null)
+                return fieldMatch.Name;
+
+            // Some game snapshots can miss the visited DC/world or format them differently.
+            // If district/ward/plot are exact and there is only one saved venue at that address,
+            // prefer showing the venue badge instead of hiding it completely.
+            var housingOnlyMatches = config.CloudSavedVenues
+                .Where(v => !string.IsNullOrWhiteSpace(v.Name) &&
+                    SameVenueDistrict(v.District, district) &&
+                    v.Ward == ward &&
+                    v.Plot == plot)
+                .Take(2)
+                .ToList();
+            if (housingOnlyMatches.Count == 1)
+                return housingOnlyMatches[0].Name;
+        }
+
+        var address = BuildPreviewVenueAddress(profile);
+        if (!string.IsNullOrWhiteSpace(address))
+        {
+            var normalizedAddress = NormalizePreviewVenueAddress(address);
+            var match = config.CloudSavedVenues.FirstOrDefault(v =>
+                !string.IsNullOrWhiteSpace(v.Name) &&
+                (string.Equals(NormalizePreviewVenueAddress(v.Address), normalizedAddress, StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(NormalizePreviewVenueAddress(v.BuildAddress()), normalizedAddress, StringComparison.OrdinalIgnoreCase)));
+            if (match != null)
+                return match.Name;
+        }
+
+        if (hasHousingParts)
+            return ffxivVenuesService.FindByAddress(dataCenter, world, district, ward, plot)?.Name ?? string.Empty;
+
+        return string.Empty;
+    }
+
+    private static string BuildPreviewVenueAddress(PrivateContact profile)
+    {
+        var dataCenter = string.IsNullOrWhiteSpace(profile.CurrentDataCenter) ? profile.DataCenter : profile.CurrentDataCenter;
+        var world = string.IsNullOrWhiteSpace(profile.CurrentWorld) ? profile.World : profile.CurrentWorld;
+        var district = ResolvePreviewResidentialDistrict(profile);
+        var ward = ExtractPreviewHousingNumber(profile.ResidentialDetails, "Ward", "w");
+        var plot = ExtractPreviewHousingNumber(profile.ResidentialDetails, "Plot", "p");
+        if (string.IsNullOrWhiteSpace(dataCenter) || string.IsNullOrWhiteSpace(world) || string.IsNullOrWhiteSpace(district) || string.IsNullOrWhiteSpace(ward) || string.IsNullOrWhiteSpace(plot))
+            return string.Empty;
+        return $"{dataCenter} {world} {district} w{ward} p{plot}";
+    }
+
+    private static string ResolvePreviewResidentialDistrict(PrivateContact profile)
+    {
+        var text = $"{profile.LastKnownZone} {profile.ResidentialDetails}";
+        if (text.Contains("Mist", StringComparison.OrdinalIgnoreCase)) return "Mist";
+        if (text.Contains("Lavender", StringComparison.OrdinalIgnoreCase) || text.Contains("Lavander", StringComparison.OrdinalIgnoreCase)) return "Lb";
+        if (text.Contains("Goblet", StringComparison.OrdinalIgnoreCase)) return "Goblet";
+        if (text.Contains("Shirogane", StringComparison.OrdinalIgnoreCase)) return "Shirogane";
+        if (text.Contains("Empyreum", StringComparison.OrdinalIgnoreCase)) return "Empyreum";
+        return string.Empty;
+    }
+
+    private static string ExtractPreviewHousingNumber(string text, string longMarker, string shortMarker)
+    {
+        var value = ExtractPreviewNumberAfter(text, longMarker);
+        return string.IsNullOrWhiteSpace(value) ? ExtractPreviewNumberAfter(text, shortMarker) : value;
+    }
+
+    private static string ExtractPreviewNumberAfter(string text, string marker)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(marker)) return string.Empty;
+        var comparison = StringComparison.OrdinalIgnoreCase;
+        var index = -1;
+        while (true)
+        {
+            index = text.IndexOf(marker, index + 1, comparison);
+            if (index < 0) return string.Empty;
+            var shortMarker = marker.Length == 1;
+            if (shortMarker && index > 0 && char.IsLetterOrDigit(text[index - 1]))
+                continue;
+            var start = index + marker.Length;
+            while (start < text.Length && !char.IsDigit(text[start])) start++;
+            if (start >= text.Length) continue;
+            var end = start;
+            while (end < text.Length && char.IsDigit(text[end])) end++;
+            return text[start..end];
+        }
+    }
+
+    private static bool VenueFieldMatches(string left, string right)
+        => string.IsNullOrWhiteSpace(left) ||
+           string.IsNullOrWhiteSpace(right) ||
+           string.Equals(left.Trim(), right.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private static bool SameVenueWorld(string left, string right)
+        => !string.IsNullOrWhiteSpace(left) &&
+           !string.IsNullOrWhiteSpace(right) &&
+           string.Equals(left.Trim(), right.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private static bool SameVenueDistrict(string left, string right)
+        => string.Equals(NormalizeVenueDistrictName(left), NormalizeVenueDistrictName(right), StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizeVenueDistrictName(string value)
+        => (value ?? string.Empty)
+            .Replace("The ", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace("Lavender Beds", "Lb", StringComparison.OrdinalIgnoreCase)
+            .Replace("Lavander Beds", "Lb", StringComparison.OrdinalIgnoreCase)
+            .Trim();
+
+    private static string NormalizePreviewVenueAddress(string value)
+    {
+        var normalized = (value ?? string.Empty)
+            .Replace("Lavender Beds", "Lb", StringComparison.OrdinalIgnoreCase)
+            .Replace("Lavander Beds", "Lb", StringComparison.OrdinalIgnoreCase)
+            .Replace("The Lavender Beds", "Lb", StringComparison.OrdinalIgnoreCase)
+            .Replace("Subdivision", "sub", StringComparison.OrdinalIgnoreCase)
+            .Replace("Subdiv", "sub", StringComparison.OrdinalIgnoreCase)
+            .Replace(",", " ", StringComparison.Ordinal)
+            .Replace("/", " ", StringComparison.Ordinal)
+            .Replace("-", " ", StringComparison.Ordinal)
+            .Trim();
+
+        while (normalized.Contains("  ", StringComparison.Ordinal))
+            normalized = normalized.Replace("  ", " ", StringComparison.Ordinal);
+
+        return normalized;
     }
 
     private void DrawProfilePlaceholder(ImDrawListPtr drawList, PrivateContact profile, Vector2 min, Vector2 size, float scale)
@@ -1129,7 +1309,7 @@ internal sealed class MyProfileWindow : Window
         ImGui.Dummy(new Vector2(available, imageSize + carouselBottomPad));
     }
 
-    private void DrawCarouselArrow(string id, string icon, float width, Vector4 accent, Action action)
+    private void DrawCarouselArrow(string id, string icon, float width, Vector4 accent, System.Action action)
     {
         var scale = ImGuiHelpers.GlobalScale;
         var pos = ImGui.GetCursorScreenPos();
@@ -1658,7 +1838,7 @@ internal sealed class MyProfileWindow : Window
     }
 
 
-    private string BuildPreviewLocationLine(out string residentialDetails)
+    private string BuildPreviewLocationLine(string currentWorld, string currentDataCenter, out string residentialDetails)
     {
         residentialDetails = string.Empty;
 
@@ -1667,16 +1847,74 @@ internal sealed class MyProfileWindow : Window
             var snapshot = GameLocationResolver.GetCurrent(dataManager, clientState);
             residentialDetails = snapshot.ResidentialDetails;
             var parts = new List<string>();
-            AddPreviewLocationPart(parts, ResolveDataCenterForWorld(config.CloudLinkedWorld));
-            AddPreviewLocationPart(parts, config.CloudLinkedWorld);
+            AddPreviewLocationPart(parts, currentDataCenter);
+            AddPreviewLocationPart(parts, currentWorld);
             AddPreviewLocationPart(parts, snapshot.Zone);
             return parts.Count == 0 ? "Current location unavailable." : string.Join(", ", parts);
         }
 
         var fallback = new List<string>();
-        AddPreviewLocationPart(fallback, ResolveDataCenterForWorld(config.CloudLinkedWorld));
-        AddPreviewLocationPart(fallback, config.CloudLinkedWorld);
+        AddPreviewLocationPart(fallback, currentDataCenter);
+        AddPreviewLocationPart(fallback, currentWorld);
         return fallback.Count == 0 ? "Current location appears after login." : string.Join(", ", fallback);
+    }
+
+    private uint ResolveLocalCurrentWorldId()
+    {
+        try
+        {
+            var localPlayer = clientState.GetType()
+                .GetProperty("LocalPlayer", BindingFlags.Public | BindingFlags.Instance)
+                ?.GetValue(clientState);
+
+            var currentWorld = localPlayer?.GetType()
+                .GetProperty("CurrentWorld", BindingFlags.Public | BindingFlags.Instance)
+                ?.GetValue(localPlayer);
+
+            var rowId = currentWorld?.GetType()
+                .GetProperty("RowId", BindingFlags.Public | BindingFlags.Instance)
+                ?.GetValue(currentWorld);
+
+            return rowId switch
+            {
+                uint u => u,
+                ushort us => us,
+                int i when i > 0 => (uint)i,
+                _ => 0u,
+            };
+        }
+        catch
+        {
+            return 0u;
+        }
+    }
+
+    private string ResolveWorldName(uint worldId)
+    {
+        if (worldId == 0) return string.Empty;
+        try
+        {
+            var world = dataManager.GetExcelSheet<World>().GetRow(worldId);
+            return world.Name.ToString();
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private string ResolveDataCenterName(uint worldId)
+    {
+        if (worldId == 0) return string.Empty;
+        try
+        {
+            var world = dataManager.GetExcelSheet<World>().GetRow(worldId);
+            return world.DataCenter.Value.Name.ToString();
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
     private static string ResolveDataCenterForWorld(string world)

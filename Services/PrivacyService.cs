@@ -187,7 +187,7 @@ internal sealed class PrivacyService
 
                 var contact = FindContact(name, world);
                 if (contact == null) continue;
-                if (HasFreshCloudPresence(contact)) continue;
+                if (IsCloudManagedPresence(contact)) continue;
 
                 var previousStatus = contact.Status;
                 var previousLocation = contact.DisplayLocation;
@@ -216,6 +216,9 @@ internal sealed class PrivacyService
             {
                 if (seen.TryGetValue(contact.Id, out var isVisible) && isVisible) continue;
 
+                if (IsCloudManagedPresence(contact))
+                    continue;
+
                 // When the native friend list has this contact loaded, let MergeNativeFriendState
                 // apply the final state. This avoids creating a fake Offline -> Online transition
                 // once per refresh for friends who are online but not visible in ObjectTable.
@@ -224,9 +227,6 @@ internal sealed class PrivacyService
                     (string.Equals(CleanName(friend.Name), contact.Name, StringComparison.OrdinalIgnoreCase) &&
                      string.Equals(friend.World, contact.World, StringComparison.OrdinalIgnoreCase))) == true;
                 if (hasNativeFriendState) continue;
-
-                if (HasFreshCloudPresence(contact))
-                    continue;
 
                 var previousStatus = contact.Status;
                 var previousLocation = contact.DisplayLocation;
@@ -421,7 +421,7 @@ internal sealed class PrivacyService
             var contact = FindContact(friend.Name, friend.World);
             if (contact == null) continue;
             if (visibleInCurrentWorld.Contains(contact.Id)) continue;
-            if (HasFreshCloudPresence(contact)) continue;
+            if (IsCloudManagedPresence(contact)) continue;
 
             var previousStatus = contact.Status;
             var previousLocation = contact.DisplayLocation;
@@ -454,12 +454,17 @@ internal sealed class PrivacyService
     }
 
 
-    private bool HasFreshCloudPresence(PrivateContact contact)
+    private bool IsCloudManagedPresence(PrivateContact contact)
     {
-        return config.CloudEnabled
-            && contact.CloudAccountLinked
-            && contact.CloudLastSyncedAt != DateTimeOffset.MinValue
-            && DateTimeOffset.UtcNow - contact.CloudLastSyncedAt < TimeSpan.FromMinutes(6);
+        // Contacts that have already been resolved through Privacy Cloud must not be
+        // forced offline or overwritten by the native friend list/ObjectTable.
+        // The native list only refreshes reliably after the game friend list is opened
+        // or when both players are on the same DC/world, which caused Privacy contacts
+        // to look offline until the native UI refreshed.
+        if (!config.CloudEnabled || !contact.CloudAccountLinked)
+            return false;
+
+        return true;
     }
 
     private static string BuildLifestreamDestination(string zone)

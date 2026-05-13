@@ -17,6 +17,8 @@ namespace Privacy.Services;
 internal sealed class FfxivVenuesService : IDisposable
 {
     private const string ApiUrl = "https://api.ffxivvenues.com/v1.0/venue";
+    private static readonly TimeSpan VenueRefreshInterval = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan FailedRefreshRetryInterval = TimeSpan.FromMinutes(2);
     private static readonly HashSet<string> NorthAmericaDataCenters = new(StringComparer.OrdinalIgnoreCase)
     {
         "Aether", "Crystal", "Dynamis", "Primal",
@@ -57,10 +59,10 @@ internal sealed class FfxivVenuesService : IDisposable
             if (fetching)
                 return;
 
-            if (!force && venues.Count > 0 && now - lastFetchUtc < TimeSpan.FromHours(24))
+            if (!force && venues.Count > 0 && now - lastFetchUtc < VenueRefreshInterval)
                 return;
 
-            if (!force && now - lastRefreshAttemptUtc < TimeSpan.FromMinutes(15))
+            if (!force && now - lastRefreshAttemptUtc < FailedRefreshRetryInterval)
                 return;
 
             fetching = true;
@@ -115,6 +117,8 @@ internal sealed class FfxivVenuesService : IDisposable
 
     public FfxivVenueEntry? FindByName(string name)
     {
+        EnsureFreshAsync();
+
         if (string.IsNullOrWhiteSpace(name))
             return null;
 
@@ -124,6 +128,8 @@ internal sealed class FfxivVenuesService : IDisposable
 
     public FfxivVenueEntry? FindBestMatch(string name, string location)
     {
+        EnsureFreshAsync();
+
         if (string.IsNullOrWhiteSpace(name))
             return null;
 
@@ -155,6 +161,8 @@ internal sealed class FfxivVenuesService : IDisposable
 
     public FfxivVenueEntry? FindByAddress(string dataCenter, string world, string district, int ward, int plot)
     {
+        EnsureFreshAsync();
+
         if (string.IsNullOrWhiteSpace(world) || string.IsNullOrWhiteSpace(district) || ward <= 0 || plot <= 0)
             return null;
 
@@ -338,7 +346,25 @@ internal sealed class FfxivVenuesService : IDisposable
 
     private static bool ResolveIsOpenNow(JsonElement item)
     {
+        if (TryReadOpenState(item, out var explicitState))
+            return explicitState;
+
         var now = DateTimeOffset.UtcNow;
+        if (item.TryGetProperty("scheduleOverrides", out var overridesElement) && overridesElement.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var overrideItem in overridesElement.EnumerateArray())
+            {
+                var inRange = IsWithinRange(now, ReadString(overrideItem, "start"), ReadString(overrideItem, "end"));
+                if (!inRange)
+                    continue;
+
+                if (TryReadOpenState(overrideItem, out var overrideState))
+                    return overrideState;
+
+                return true;
+            }
+        }
+
         if (item.TryGetProperty("schedule", out var schedules) && schedules.ValueKind == JsonValueKind.Array)
         {
             foreach (var schedule in schedules.EnumerateArray())
@@ -346,37 +372,82 @@ internal sealed class FfxivVenuesService : IDisposable
                 if (!schedule.TryGetProperty("resolution", out var resolution) || resolution.ValueKind != JsonValueKind.Object)
                     continue;
 
-                var startText = ReadString(resolution, "start");
-                if (!DateTimeOffset.TryParse(startText, out var start))
-                    continue;
-                var endText = ReadString(resolution, "end");
-                var end = DateTimeOffset.TryParse(endText, out var parsedEnd) ? parsedEnd : start.AddHours(4);
-                if (end < start)
-                    end = end.AddDays(1);
-
-                if (now >= start && now <= end)
+                if (IsWithinRange(now, ReadString(resolution, "start"), ReadString(resolution, "end")))
                     return true;
             }
         }
 
-        if (item.TryGetProperty("scheduleOverrides", out var overridesElement) && overridesElement.ValueKind == JsonValueKind.Array)
+        return false;
+    }
+
+    private static bool IsWithinRange(DateTimeOffset now, string startText, string endText)
+    {
+        if (!DateTimeOffset.TryParse(startText, out var start))
+            return false;
+
+        var end = DateTimeOffset.TryParse(endText, out var parsedEnd) ? parsedEnd : start.AddHours(4);
+        if (end < start)
+            end = end.AddDays(1);
+
+        return now >= start && now <= end;
+    }
+
+    private static bool TryReadOpenState(JsonElement item, out bool isOpen)
+    {
+        foreach (var key in new[] { "isOpenNow", "openNow", "currentlyOpen", "isOpen", "open" })
         {
-            foreach (var overrideItem in overridesElement.EnumerateArray())
+            if (!item.TryGetProperty(key, out var value) || value.ValueKind == JsonValueKind.Null)
+                continue;
+
+            if (value.ValueKind == JsonValueKind.True)
             {
-                if (!ReadBool(overrideItem, "open"))
-                    continue;
-                var startText = ReadString(overrideItem, "start");
-                if (!DateTimeOffset.TryParse(startText, out var start))
-                    continue;
-                var endText = ReadString(overrideItem, "end");
-                var end = DateTimeOffset.TryParse(endText, out var parsedEnd) ? parsedEnd : start.AddHours(4);
-                if (end < start)
-                    end = end.AddDays(1);
-                if (now >= start && now <= end)
-                    return true;
+                isOpen = true;
+                return true;
+            }
+
+            if (value.ValueKind == JsonValueKind.False)
+            {
+                isOpen = false;
+                return true;
+            }
+
+            var text = value.ToString().Trim();
+            if (bool.TryParse(text, out var parsed))
+            {
+                isOpen = parsed;
+                return true;
+            }
+
+            if (text.Equals("open", StringComparison.OrdinalIgnoreCase) || text.Equals("opened", StringComparison.OrdinalIgnoreCase) || text.Equals("live", StringComparison.OrdinalIgnoreCase))
+            {
+                isOpen = true;
+                return true;
+            }
+
+            if (text.Equals("closed", StringComparison.OrdinalIgnoreCase) || text.Equals("offline", StringComparison.OrdinalIgnoreCase))
+            {
+                isOpen = false;
+                return true;
             }
         }
 
+        foreach (var key in new[] { "status", "state", "openState" })
+        {
+            var text = ReadString(item, key).Trim();
+            if (text.Equals("open", StringComparison.OrdinalIgnoreCase) || text.Equals("opened", StringComparison.OrdinalIgnoreCase) || text.Equals("live", StringComparison.OrdinalIgnoreCase))
+            {
+                isOpen = true;
+                return true;
+            }
+
+            if (text.Equals("closed", StringComparison.OrdinalIgnoreCase) || text.Equals("offline", StringComparison.OrdinalIgnoreCase))
+            {
+                isOpen = false;
+                return true;
+            }
+        }
+
+        isOpen = false;
         return false;
     }
 

@@ -117,6 +117,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private bool hasMainBackgroundBounds;
     private Vector2 topSummaryPanelPos;
     private Vector2 topSummaryPanelSize;
+    private bool draggingWindowFromSummary;
     private string? draggingRowKind;
     private string? draggingRowId;
     private string? draggingRowGroupId;
@@ -183,7 +184,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
             .AllowPinning(true)
             .AllowClickthrough(false)
             .SetSizeConstraints(new Vector2(CompactUiWidth, TopSummaryHeight + 8f), new Vector2(CompactUiWidth, CompactUiHeight))
-            .AddFlags(ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
+            .AddFlags(ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoMove)
             .Apply();
     }
 
@@ -257,53 +258,82 @@ internal sealed class PrivacyWindow : Window, IDisposable
         listService.RefreshRuntimeState(friendListService.Friends);
 
         var drawList = ImGui.GetWindowDrawList();
-        var windowPos = ImGui.GetWindowPos();
-        var windowSize = ImGui.GetWindowSize();
-        windowClipMin = windowPos - new Vector2(18f, 18f) * ImGuiHelpers.GlobalScale;
-        windowClipMax = windowPos + windowSize + new Vector2(18f, 18f) * ImGuiHelpers.GlobalScale;
-        hasMainBackgroundBounds = false;
-        DrawWindowChrome(drawList, windowPos, windowSize);
+        var channelsSplit = false;
+        var channelsMerged = false;
+        const int contentChannel = 0;
+        const int topBarChannel = 1;
 
-        windowContentWidth = GetWindowContentRegionWidth();
-        var style = ImGui.GetStyle();
-        var scale = ImGuiHelpers.GlobalScale;
-        var gradientInset = 4f * scale;
-        var bottomNavHeight = BottomNavigationHeight * scale;
-        var mainColumnWidth = GetWindowContentRegionWidth();
-
-        hasTopSummaryPanelGeometry = false;
-        if (!config.HideTopBar)
+        try
         {
-            using (ImRaii.PushId("top-summary"))
-                DrawTopSummaryPanel();
-        }
+            drawList.ChannelsSplit(2);
+            channelsSplit = true;
+            drawList.ChannelsSetCurrent(contentChannel);
 
-        if (config.WindowCollapsed)
-        {
-            if (config.HideTopBar)
+            var windowPos = ImGui.GetWindowPos();
+            var windowSize = ImGui.GetWindowSize();
+            windowClipMin = windowPos - new Vector2(18f, 18f) * ImGuiHelpers.GlobalScale;
+            windowClipMax = windowPos + windowSize + new Vector2(18f, 18f) * ImGuiHelpers.GlobalScale;
+            hasMainBackgroundBounds = false;
+            DrawWindowChrome(drawList, windowPos, windowSize);
+
+            windowContentWidth = GetWindowContentRegionWidth();
+            var style = ImGui.GetStyle();
+            var scale = ImGuiHelpers.GlobalScale;
+            var gradientInset = 4f * scale;
+            var bottomNavHeight = BottomNavigationHeight * scale;
+            var mainColumnWidth = GetWindowContentRegionWidth();
+
+            hasTopSummaryPanelGeometry = false;
+            if (!config.HideTopBar)
             {
-                using (ImRaii.PushId("collapsed-header"))
-                    DrawUIDHeader();
+                using (ImRaii.PushId("top-summary"))
+                    DrawTopSummaryPanel();
             }
-            else
+
+            if (config.WindowCollapsed)
             {
-                using (ImRaii.PushId("top-summary-layer"))
+                if (config.HideTopBar)
+                {
+                    using (ImRaii.PushId("collapsed-header"))
+                        DrawUIDHeader();
+                }
+                else
+                {
+                    drawList.ChannelsSetCurrent(topBarChannel);
                     RedrawTopSummaryPanelOverlay();
+                    drawList.ChannelsSetCurrent(contentChannel);
+                }
+
+                drawList.ChannelsMerge();
+                channelsMerged = true;
+                DrawDeferredPopups();
+                fileDialog.Draw();
+                return;
             }
+
+            var availableHeight = MathF.Max(1f, ImGui.GetContentRegionAvail().Y);
+            var bodyHeight = MathF.Max(1f, availableHeight - bottomNavHeight - style.ItemSpacing.Y);
+            DrawCompactMainColumn(drawList, mainColumnWidth, bodyHeight, gradientInset);
+            ImGui.SetCursorPosY(ImGui.GetCursorPosY() + style.ItemSpacing.Y);
+            DrawBottomNavigationBar(mainColumnWidth, bottomNavHeight);
+            if (!config.HideTopBar)
+            {
+                drawList.ChannelsSetCurrent(topBarChannel);
+                RedrawTopSummaryPanelOverlay();
+                drawList.ChannelsSetCurrent(contentChannel);
+            }
+
+            drawList.ChannelsMerge();
+            channelsMerged = true;
 
             DrawDeferredPopups();
             fileDialog.Draw();
-            return;
         }
-
-        var availableHeight = MathF.Max(1f, ImGui.GetContentRegionAvail().Y);
-        var bodyHeight = MathF.Max(1f, availableHeight - bottomNavHeight - style.ItemSpacing.Y);
-        DrawCompactMainColumn(drawList, mainColumnWidth, bodyHeight, gradientInset);
-        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + style.ItemSpacing.Y);
-        DrawBottomNavigationBar(mainColumnWidth, bottomNavHeight);
-
-        DrawDeferredPopups();
-        fileDialog.Draw();
+        finally
+        {
+            if (channelsSplit && !channelsMerged)
+                drawList.ChannelsMerge();
+        }
     }
 
     private void PushColor(ImGuiCol target, Vector4 color)
@@ -1309,12 +1339,6 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var gradientBottom = MathF.Max(gradientTop, footerTop - style.ItemSpacing.Y - gradientInset);
         DrawMainColumnGradient(drawList, gradientTop, gradientBottom);
 
-        if (!config.HideTopBar)
-        {
-            using (ImRaii.PushId("top-summary-layer"))
-                RedrawTopSummaryPanelOverlay();
-        }
-
     }
 
     private bool DrawCompactTopWarnings()
@@ -1378,6 +1402,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         if (config.HideTopBar)
         {
             DrawHeaderWindowControls(headerStart, width, height);
+            HandleHiddenHeaderWindowDrag(headerStart, width, height);
         }
 
         ImGui.SetCursorScreenPos(headerStart);
@@ -1509,6 +1534,30 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
         if (hovered)
             ImGui.SetTooltip(config.MinimalMode ? "Disable minimal contact list mode" : "Enable minimal contact list mode");
+    }
+
+    private void HandleHiddenHeaderWindowDrag(Vector2 headerStart, float width, float height)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var mouse = ImGui.GetMousePos();
+        var min = headerStart;
+        var max = headerStart + new Vector2(width - 104f * scale, height);
+
+        if (mouse.X >= min.X && mouse.X <= max.X && mouse.Y >= min.Y && mouse.Y <= max.Y && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+            draggingWindowFromSummary = true;
+
+        if (!ImGui.IsMouseDown(ImGuiMouseButton.Left))
+        {
+            draggingWindowFromSummary = false;
+            return;
+        }
+
+        if (!draggingWindowFromSummary)
+            return;
+
+        var delta = ImGui.GetIO().MouseDelta;
+        if (delta.X != 0f || delta.Y != 0f)
+            ImGui.SetWindowPos(ImGui.GetWindowPos() + delta);
     }
 
     private void DrawHeaderWindowControls(Vector2 headerStart, float width, float height)
@@ -4248,13 +4297,37 @@ internal sealed class PrivacyWindow : Window, IDisposable
         topSummaryPanelSize = size;
         hasTopSummaryPanelGeometry = true;
 
-        // Reserve real layout space for the top bar before the main content is drawn.
-        // The visible bar itself is drawn at the end of Draw() in a child overlay layer,
-        // so the main content/background cannot draw over it.
-        ImGui.SetCursorScreenPos(cursor + new Vector2(0f, height + 6f * scale));
+        // Reserve the top bar layout space only.
+        // The visible bar is drawn later as its own child window so it is ordered
+        // above the main content child, instead of fighting the background draw order.
+        ImGui.SetCursorScreenPos(cursor + new Vector2(0f, height + 1f * scale));
     }
 
 
+
+    private void HandleTopSummaryWindowDrag(Vector2 pos, Vector2 size, Vector2 collapsePos, Vector2 closePos, Vector2 buttonSize, Vector2 parentWindowPos)
+    {
+        var mouse = ImGui.GetMousePos();
+        var hoveringBar = mouse.X >= pos.X && mouse.X <= pos.X + size.X && mouse.Y >= pos.Y && mouse.Y <= pos.Y + size.Y;
+        var hoveringCollapse = mouse.X >= collapsePos.X && mouse.X <= collapsePos.X + buttonSize.X && mouse.Y >= collapsePos.Y && mouse.Y <= collapsePos.Y + buttonSize.Y;
+        var hoveringClose = mouse.X >= closePos.X && mouse.X <= closePos.X + buttonSize.X && mouse.Y >= closePos.Y && mouse.Y <= closePos.Y + buttonSize.Y;
+
+        if (hoveringBar && !hoveringCollapse && !hoveringClose && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+            draggingWindowFromSummary = true;
+
+        if (!ImGui.IsMouseDown(ImGuiMouseButton.Left))
+        {
+            draggingWindowFromSummary = false;
+            return;
+        }
+
+        if (!draggingWindowFromSummary)
+            return;
+
+        var delta = ImGui.GetIO().MouseDelta;
+        if (delta.X != 0f || delta.Y != 0f)
+            ImGui.SetWindowPos("Privacy###PrivacyMain", parentWindowPos + delta, ImGuiCond.Always);
+    }
 
     private void RedrawTopSummaryPanelOverlay()
     {
@@ -4263,6 +4336,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
         var scale = ImGuiHelpers.GlobalScale;
         var drawList = ImGui.GetWindowDrawList();
+        var parentWindowPos = ImGui.GetWindowPos();
         var pos = topSummaryPanelPos;
         var size = topSummaryPanelSize;
         var height = size.Y;
@@ -4318,8 +4392,13 @@ internal sealed class PrivacyWindow : Window, IDisposable
         DrawTextWithShadow(drawList, new Vector2(x, y), Color(UiColors.TextDim), venuesText, textSize);
         drawList.PopClipRect();
 
-        var mouse = ImGui.GetMousePos();
-        var hoveredCollapse = mouse.X >= collapsePos.X && mouse.X <= collapsePos.X + closeSize.X && mouse.Y >= collapsePos.Y && mouse.Y <= collapsePos.Y + closeSize.Y;
+        ImGui.SetCursorScreenPos(collapsePos);
+        if (ImGui.InvisibleButton("top-summary-collapse", closeSize))
+        {
+            config.WindowCollapsed = !config.WindowCollapsed;
+            config.Save();
+        }
+        var hoveredCollapse = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
         var collapseFill = hoveredCollapse ? Alpha(config.AccentColor, 0.24f) : Alpha(UiColors.Get("ButtonDefault"), 0.20f);
         drawList.AddRectFilled(collapsePos, collapsePos + closeSize, Color(collapseFill), 4f * scale);
         drawList.AddRect(collapsePos, collapsePos + closeSize, Color(Alpha(hoveredCollapse ? config.AccentColor : UiColors.TextDim, hoveredCollapse ? 0.58f : 0.22f)), 4f * scale, ImDrawFlags.None, scale);
@@ -4341,7 +4420,10 @@ internal sealed class PrivacyWindow : Window, IDisposable
         if (hoveredCollapse)
             ImGui.SetTooltip(config.WindowCollapsed ? "Expand Privacy" : "Collapse Privacy");
 
-        var hoveredClose = mouse.X >= closePos.X && mouse.X <= closePos.X + closeSize.X && mouse.Y >= closePos.Y && mouse.Y <= closePos.Y + closeSize.Y;
+        ImGui.SetCursorScreenPos(closePos);
+        if (ImGui.InvisibleButton("top-summary-close", closeSize))
+            IsOpen = false;
+        var hoveredClose = ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem);
         var closeFill = hoveredClose ? Alpha(UiColors.Busy, 0.25f) : Alpha(UiColors.Get("ButtonDefault"), 0.20f);
         drawList.AddRectFilled(closePos, closePos + closeSize, Color(closeFill), 4f * scale);
         drawList.AddRect(closePos, closePos + closeSize, Color(Alpha(hoveredClose ? UiColors.Busy : UiColors.TextDim, hoveredClose ? 0.58f : 0.22f)), 4f * scale, ImDrawFlags.None, scale);
@@ -4355,27 +4437,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
         if (hoveredClose)
             ImGui.SetTooltip("Close Privacy");
 
+        HandleTopSummaryWindowDrag(pos, size, collapsePos, closePos, closeSize, parentWindowPos);
         drawList.PopClipRect();
-
-        HandleTopSummaryPanelButtons(collapsePos, closePos, closeSize);
-    }
-
-    private void HandleTopSummaryPanelButtons(Vector2 collapsePos, Vector2 closePos, Vector2 buttonSize)
-    {
-        var mouse = ImGui.GetMousePos();
-        var overCollapse = mouse.X >= collapsePos.X && mouse.X <= collapsePos.X + buttonSize.X &&
-                           mouse.Y >= collapsePos.Y && mouse.Y <= collapsePos.Y + buttonSize.Y;
-        var overClose = mouse.X >= closePos.X && mouse.X <= closePos.X + buttonSize.X &&
-                        mouse.Y >= closePos.Y && mouse.Y <= closePos.Y + buttonSize.Y;
-
-        if (overCollapse && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
-        {
-            config.WindowCollapsed = !config.WindowCollapsed;
-            config.Save();
-        }
-
-        if (overClose && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
-            IsOpen = false;
     }
 
     private void DrawBottomNavigationBar(float availableWidth, float height)

@@ -23,7 +23,10 @@ namespace Privacy.Services;
 internal sealed class PrivacyCloudService : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
-
+    private const int StableHeartbeatSeconds = 45;
+    private const int PresenceChangedHeartbeatSeconds = 1;
+    private const int CloudManagedProfileResolveSeconds = 60;
+    private const int UnresolvedProfileResolveSeconds = 120;
 
     private static JsonSerializerOptions CreateJsonOptions()
     {
@@ -199,18 +202,21 @@ internal sealed class PrivacyCloudService : IDisposable
         if (syncInProgress)
             return;
 
-        if (now < nextHeartbeat && now < nextProfileResolve && !presenceChanged)
+        var hasUnresolvedContacts = config.Contacts.Any(contact => !contact.CloudAccountLinked);
+        var shouldPollProfiles = now >= nextProfileResolve;
+
+        if (now < nextHeartbeat && !shouldPollProfiles && !presenceChanged)
             return;
 
         var shouldSendHeartbeat = config.CloudHeartbeatEnabled && (now >= nextHeartbeat || presenceChanged);
-        var shouldResolveProfiles = config.CloudProfileLookupEnabled && now >= nextProfileResolve;
+        var shouldResolveProfiles = config.CloudProfileLookupEnabled && shouldPollProfiles;
         var heartbeatIdentity = shouldSendHeartbeat ? GetLocalCharacterIdentity() : null;
 
         if (shouldSendHeartbeat)
-            nextHeartbeat = DateTime.UtcNow.AddSeconds(presenceChanged ? 1 : 20);
+            nextHeartbeat = DateTime.UtcNow.AddSeconds(presenceChanged ? PresenceChangedHeartbeatSeconds : StableHeartbeatSeconds);
 
         if (shouldResolveProfiles)
-            nextProfileResolve = DateTime.UtcNow.AddSeconds(20);
+            nextProfileResolve = DateTime.UtcNow.AddSeconds(hasUnresolvedContacts ? UnresolvedProfileResolveSeconds : CloudManagedProfileResolveSeconds);
 
         syncInProgress = true;
         _ = Task.Run(async () =>
