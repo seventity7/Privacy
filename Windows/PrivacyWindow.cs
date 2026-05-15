@@ -210,8 +210,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
         WindowBuilder.For(this)
             .AllowPinning(true)
             .AllowClickthrough(false)
-            .SetSizeConstraints(new Vector2(430f, TopSummaryHeight + 8f), new Vector2(900f, 1000f))
-            .AddFlags(ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
+            .SetSizeConstraints(new Vector2(CompactUiWidth, TopSummaryHeight + 18f), new Vector2(CompactUiWidth, CompactUiHeight))
+            .AddFlags(ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoCollapse)
             .Apply();
     }
 
@@ -221,15 +221,15 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
     public override void PreDraw()
     {
-        if (config.WindowCollapsed)
+        var targetSize = GetMainWindowSize();
+
+        Size = targetSize;
+        SizeCondition = ImGuiCond.Always;
+        SizeConstraints = new WindowSizeConstraints
         {
-            Size = new Vector2(MathF.Max(CompactUiWidth, ImGui.GetWindowSize().X), (config.HideTopBar ? HeaderHeight : TopSummaryHeight) + 8f);
-            SizeCondition = ImGuiCond.Always;
-        }
-        else
-        {
-            SizeCondition = ImGuiCond.FirstUseEver;
-        }
+            MinimumSize = targetSize,
+            MaximumSize = targetSize,
+        };
 
         pushedColorCount = 0;
         pushedStyleVarCount = 0;
@@ -274,6 +274,20 @@ internal sealed class PrivacyWindow : Window, IDisposable
         PushStyleVar(ImGuiStyleVar.FrameRounding, 4f * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.ScrollbarRounding, 4f * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.GrabRounding, 4f * ImGuiHelpers.GlobalScale);
+    }
+
+
+    private Vector2 GetMainWindowSize()
+    {
+        if (!config.WindowCollapsed)
+            return new Vector2(CompactUiWidth, CompactUiHeight);
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var style = ImGui.GetStyle();
+        var visibleHeight = config.HideTopBar ? HeaderHeight : TopSummaryHeight;
+        var collapsedHeight = visibleHeight * scale + style.WindowPadding.Y * 2f + 12f * scale;
+
+        return new Vector2(CompactUiWidth, MathF.Ceiling(collapsedHeight));
     }
 
     public override void PostDraw()
@@ -1636,9 +1650,10 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var scale = ImGuiHelpers.GlobalScale;
         var drawList = ImGui.GetWindowDrawList();
         var size = new Vector2(24f, 24f) * scale;
-        var minimalPos = headerStart + new Vector2(width - size.X - 12f * scale, (height - size.Y) * 0.5f);
-        var refreshPos = minimalPos - new Vector2(size.X + 5f * scale, 0f);
-        var loginPos = refreshPos - new Vector2(size.X + 5f * scale, 0f);
+        var refreshSlot = config.HideTopBar ? 3 : 1;
+        var loginSlot = refreshSlot + 1;
+        var refreshPos = GetHeaderButtonSlotPosition(headerStart, width, height, size, refreshSlot);
+        var loginPos = GetHeaderButtonSlotPosition(headerStart, width, height, size, loginSlot);
 
         DrawHeaderIconButton(drawList, loginPos, size, FontAwesomeIcon.Key, "Log In/Log Off", () => loginWindow.IsOpen = true);
         DrawRefreshSyncHeaderButton(drawList, refreshPos, size);
@@ -1951,7 +1966,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         var scale = ImGuiHelpers.GlobalScale;
         var drawList = ImGui.GetWindowDrawList();
         var size = new Vector2(24f, 24f) * scale;
-        var pos = headerStart + new Vector2(width - size.X - 12f * scale, (height - size.Y) * 0.5f);
+        var pos = GetHeaderButtonSlotPosition(headerStart, width, height, size, config.HideTopBar ? 2 : 0);
         ImGui.SetCursorScreenPos(pos);
         if (ImGui.InvisibleButton("minimal-mode-toggle", size))
         {
@@ -1975,24 +1990,28 @@ internal sealed class PrivacyWindow : Window, IDisposable
             ImGui.SetTooltip(config.MinimalMode ? "Disable minimal contact list mode" : "Enable minimal contact list mode");
     }
 
+    private static Vector2 GetHeaderButtonSlotPosition(Vector2 headerStart, float width, float height, Vector2 size, int slotFromRight)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var spacing = 5f * scale;
+        var rightX = headerStart.X + width - size.X - 12f * scale;
+        return new Vector2(rightX - slotFromRight * (size.X + spacing), headerStart.Y + (height - size.Y) * 0.5f);
+    }
+
     private void DrawHeaderWindowControls(Vector2 headerStart, float width, float height)
     {
         var scale = ImGuiHelpers.GlobalScale;
         var drawList = ImGui.GetWindowDrawList();
         var size = new Vector2(24f, 24f) * scale;
-        var minimalPos = headerStart + new Vector2(width - size.X - 12f * scale, (height - size.Y) * 0.5f);
-        var refreshPos = minimalPos - new Vector2(size.X + 5f * scale, 0f);
-        var profilePos = refreshPos - new Vector2(size.X + 5f * scale, 0f);
-        var loginPos = profilePos - new Vector2(size.X + 5f * scale, 0f);
-        var collapsePos = loginPos - new Vector2(size.X + 5f * scale, 0f);
-        var closePos = collapsePos - new Vector2(size.X + 5f * scale, 0f);
+        var closePos = GetHeaderButtonSlotPosition(headerStart, width, height, size, 0);
+        var collapsePos = GetHeaderButtonSlotPosition(headerStart, width, height, size, 1);
 
-        DrawHeaderWindowButton(drawList, closePos, size, char.ConvertFromUtf32(0xF00D), UiColors.Busy, "Close Privacy", () => IsOpen = false, true);
         DrawHeaderWindowButton(drawList, collapsePos, size, config.WindowCollapsed ? "+" : char.ConvertFromUtf32(0xF068), config.AccentColor, config.WindowCollapsed ? "Expand Privacy" : "Collapse Privacy", () =>
         {
             config.WindowCollapsed = !config.WindowCollapsed;
             config.Save();
         }, !config.WindowCollapsed);
+        DrawHeaderWindowButton(drawList, closePos, size, char.ConvertFromUtf32(0xF00D), UiColors.Busy, "Close Privacy", () => IsOpen = false, true);
     }
 
     private void DrawHeaderWindowButton(ImDrawListPtr drawList, Vector2 pos, Vector2 size, string text, Vector4 hoverColor, string tooltip, Action click, bool useIconFont = false)
