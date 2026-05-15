@@ -45,6 +45,10 @@ internal sealed class OnlineProfileWindow : Window
     private bool ownerProbeInitialized;
     private bool ownerProbeResult;
     private DateTime ownerProbeNextAt = DateTime.MinValue;
+    private CancellationTokenSource? profileResolveCts;
+    private string resolvingContactId = string.Empty;
+    private bool profileResolveFinished;
+    private bool profileResolveFound;
 
     public OnlineProfileWindow(Configuration config, ProfileImageCache profileImages, GameIconCache gameIcons, FfxivVenuesService ffxivVenuesService, PrivacyCloudService cloudService)
         : base("Online Profile###PrivacyOnlineProfile")
@@ -69,7 +73,43 @@ internal sealed class OnlineProfileWindow : Window
     {
         contact = selectedContact;
         TryQueueCloudAvatarDownload(selectedContact);
+        QueueProfileResolve(selectedContact);
         IsOpen = true;
+    }
+
+    private void QueueProfileResolve(PrivateContact selectedContact)
+    {
+        profileResolveCts?.Cancel();
+        profileResolveCts?.Dispose();
+        profileResolveCts = new CancellationTokenSource();
+        resolvingContactId = selectedContact.Id;
+        profileResolveFinished = false;
+        profileResolveFound = false;
+        _ = ResolveProfileForOpenAsync(selectedContact, profileResolveCts.Token);
+    }
+
+    private async Task ResolveProfileForOpenAsync(PrivateContact selectedContact, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var found = await cloudService.ResolveAndApplyProfileAsync(selectedContact, profileImages, cancellationToken).ConfigureAwait(false);
+            if (cancellationToken.IsCancellationRequested)
+                return;
+
+            profileResolveFound = found;
+            profileResolveFinished = true;
+
+            if (found)
+                TryQueueCloudAvatarDownload(selectedContact);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch
+        {
+            if (!cancellationToken.IsCancellationRequested)
+                profileResolveFinished = true;
+        }
     }
 
     public override void PreDraw()
@@ -136,6 +176,14 @@ internal sealed class OnlineProfileWindow : Window
         {
             ImGui.TextDisabled("No profile selected.");
             return;
+        }
+
+        if (!contact.CloudAccountLinked && string.Equals(resolvingContactId, contact.Id, StringComparison.Ordinal))
+        {
+            if (!profileResolveFinished)
+                ImGui.TextDisabled("Looking for this user's online profile...");
+            else if (!profileResolveFound)
+                ImGui.TextDisabled("Cloud lookup did not find a registered online profile for this character.");
         }
 
         if (!debugOverlayActive)

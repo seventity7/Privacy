@@ -74,7 +74,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
     private bool quickNoteWindowOpen;
     private Vector2 quickNoteWindowPos;
     private bool unregisteredProfileWindowOpen;
-    private Vector2 unregisteredProfileWindowPos;
+    private Vector2 unregisteredProfileWindowPos = new(120f, 120f);
     private PrivateContact? tagContact;
     private string tagBuffer = string.Empty;
     private string tagColorHexBuffer = "#FFD56A";
@@ -210,8 +210,8 @@ internal sealed class PrivacyWindow : Window, IDisposable
         WindowBuilder.For(this)
             .AllowPinning(true)
             .AllowClickthrough(false)
-            .SetSizeConstraints(new Vector2(CompactUiWidth, TopSummaryHeight + 18f), new Vector2(CompactUiWidth, CompactUiHeight))
-            .AddFlags(ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoCollapse)
+            .SetSizeConstraints(new Vector2(CompactUiWidth, TopSummaryHeight + 8f), new Vector2(CompactUiWidth, CompactUiHeight))
+            .AddFlags(ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
             .Apply();
     }
 
@@ -221,7 +221,10 @@ internal sealed class PrivacyWindow : Window, IDisposable
 
     public override void PreDraw()
     {
-        var targetSize = GetMainWindowSize();
+        var scale = ImGuiHelpers.GlobalScale;
+        var targetSize = config.WindowCollapsed
+            ? new Vector2(CompactUiWidth * scale, (config.HideTopBar ? HeaderHeight : TopSummaryHeight) * scale + 10f * scale)
+            : new Vector2(CompactUiWidth, CompactUiHeight);
 
         Size = targetSize;
         SizeCondition = ImGuiCond.Always;
@@ -274,20 +277,6 @@ internal sealed class PrivacyWindow : Window, IDisposable
         PushStyleVar(ImGuiStyleVar.FrameRounding, 4f * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.ScrollbarRounding, 4f * ImGuiHelpers.GlobalScale);
         PushStyleVar(ImGuiStyleVar.GrabRounding, 4f * ImGuiHelpers.GlobalScale);
-    }
-
-
-    private Vector2 GetMainWindowSize()
-    {
-        if (!config.WindowCollapsed)
-            return new Vector2(CompactUiWidth, CompactUiHeight);
-
-        var scale = ImGuiHelpers.GlobalScale;
-        var style = ImGui.GetStyle();
-        var visibleHeight = config.HideTopBar ? HeaderHeight : TopSummaryHeight;
-        var collapsedHeight = visibleHeight * scale + style.WindowPadding.Y * 2f + 12f * scale;
-
-        return new Vector2(CompactUiWidth, MathF.Ceiling(collapsedHeight));
     }
 
     public override void PostDraw()
@@ -5576,14 +5565,7 @@ internal sealed class PrivacyWindow : Window, IDisposable
         if (ImGui.MenuItem("View online profile"))
         {
             log.Information("Privacy: View online profile clicked for {Name}@{World}; cloudLinked={CloudLinked}; cloudProfileId={CloudProfileId}.", contact.Name, contact.World, contact.CloudAccountLinked, contact.CloudProfileId);
-            if (contact.CloudAccountLinked)
-                onlineProfileWindow.Open(contact);
-            else
-            {
-                unregisteredProfileWindowPos = ResolveContextSubWindowPos();
-                unregisteredProfileWindowOpen = true;
-            }
-
+            onlineProfileWindow.Open(contact);
             ImGui.CloseCurrentPopup();
         }
 

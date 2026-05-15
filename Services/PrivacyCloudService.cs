@@ -593,28 +593,34 @@ internal sealed class PrivacyCloudService : IDisposable
         return results.FirstOrDefault();
     }
 
+    public async Task<bool> ResolveAndApplyProfileAsync(PrivateContact contact, ProfileImageCache profileImages, CancellationToken cancellationToken = default)
+    {
+        var profile = await FetchProfileSnapshotAsync(contact, cancellationToken).ConfigureAwait(false);
+        if (profile == null)
+        {
+            log.Information("Privacy: no cloud profile found for {Name}@{World}.", contact.Name, contact.World);
+            return false;
+        }
+
+        await ApplyCloudProfileAsync(contact, profile, profileImages, cancellationToken).ConfigureAwait(false);
+        config.Save();
+        log.Information("Privacy: cloud profile resolved for {Name}@{World}; profileId={ProfileId}.", contact.Name, contact.World, contact.CloudProfileId);
+        return true;
+    }
+
     public async Task<List<CloudProfileSnapshot>> FetchProfileSnapshotsAsync(IReadOnlyList<PrivateContact> contacts, CancellationToken cancellationToken = default)
     {
         if (contacts.Count == 0)
             return new List<CloudProfileSnapshot>();
 
         var candidates = contacts
-            .Where(c => !string.IsNullOrWhiteSpace(c.CloudProfileId) ||
-                        (!string.IsNullOrWhiteSpace(c.Name) && (!string.IsNullOrWhiteSpace(c.World) || c.WorldId != 0 || c.ContentId != 0)))
-            .Select(c => new
-            {
-                localId = c.Id,
-                profileId = c.CloudProfileId,
-                userId = c.CloudProfileId,
-                name = c.Name,
-                world = c.World,
-                worldId = c.WorldId,
-                contentId = c.ContentId,
-            })
+            .SelectMany(BuildResolveCandidates)
             .ToList();
 
         if (candidates.Count == 0)
             return new List<CloudProfileSnapshot>();
+
+        log.Information("Privacy: resolving {ContactCount} contact(s) through cloud using {CandidateCount} lookup candidate(s).", contacts.Count, candidates.Count);
 
         var response = await PostAsync<ResolveProfilesResponse>("profiles/resolve", new
         {
@@ -628,6 +634,116 @@ internal sealed class PrivacyCloudService : IDisposable
 
         return response.Value.GetProfiles().ToList();
     }
+
+    private IEnumerable<object> BuildResolveCandidates(PrivateContact contact)
+    {
+        if (!HasResolveIdentity(contact))
+            yield break;
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var candidate in BuildResolveCandidatesForWorld(contact, contact.World, contact.WorldId, contact.DataCenter))
+        {
+            if (seen.Add(BuildResolveCandidateKey(candidate)))
+                yield return candidate;
+        }
+
+        if (!string.IsNullOrWhiteSpace(contact.CurrentWorld) || contact.CurrentWorldId != 0)
+        {
+            foreach (var candidate in BuildResolveCandidatesForWorld(contact, contact.CurrentWorld, contact.CurrentWorldId, contact.CurrentDataCenter))
+            {
+                if (seen.Add(BuildResolveCandidateKey(candidate)))
+                    yield return candidate;
+            }
+        }
+    }
+
+    private static bool HasResolveIdentity(PrivateContact contact)
+        => !string.IsNullOrWhiteSpace(contact.CloudProfileId) ||
+           (!string.IsNullOrWhiteSpace(contact.Name) &&
+            (!string.IsNullOrWhiteSpace(contact.World) ||
+             !string.IsNullOrWhiteSpace(contact.CurrentWorld) ||
+             contact.WorldId != 0 ||
+             contact.CurrentWorldId != 0 ||
+             contact.ContentId != 0));
+
+    private IEnumerable<object> BuildResolveCandidatesForWorld(PrivateContact contact, string world, uint worldId, string dataCenter)
+    {
+        var cleanWorld = (world ?? string.Empty).Trim();
+        var cleanName = (contact.Name ?? string.Empty).Trim();
+        var cleanDataCenter = (dataCenter ?? string.Empty).Trim();
+        var resolvedWorldId = worldId != 0 ? worldId : ResolveWorldIdForCloudLookup(cleanWorld);
+        var cleanCurrentWorld = (contact.CurrentWorld ?? string.Empty).Trim();
+        var resolvedCurrentWorldId = contact.CurrentWorldId != 0
+            ? contact.CurrentWorldId
+            : ResolveWorldIdForCloudLookup(cleanCurrentWorld);
+
+        if (string.IsNullOrWhiteSpace(contact.CloudProfileId) &&
+            string.IsNullOrWhiteSpace(cleanName) &&
+            string.IsNullOrWhiteSpace(cleanWorld) &&
+            resolvedWorldId == 0 &&
+            contact.ContentId == 0)
+            yield break;
+
+        yield return new
+        {
+            localId = contact.Id,
+            profileId = contact.CloudProfileId,
+            profile_id = contact.CloudProfileId,
+            userId = contact.CloudProfileId,
+            user_id = contact.CloudProfileId,
+            name = cleanName,
+            characterName = cleanName,
+            character_name = cleanName,
+            world = cleanWorld,
+            worldName = cleanWorld,
+            world_name = cleanWorld,
+            homeWorld = cleanWorld,
+            homeWorldName = cleanWorld,
+            home_world = cleanWorld,
+            home_world_name = cleanWorld,
+            worldId = resolvedWorldId,
+            world_id = resolvedWorldId,
+            homeWorldId = resolvedWorldId,
+            home_world_id = resolvedWorldId,
+            currentWorld = cleanCurrentWorld,
+            currentWorldName = cleanCurrentWorld,
+            current_world = cleanCurrentWorld,
+            current_world_name = cleanCurrentWorld,
+            currentWorldId = resolvedCurrentWorldId,
+            current_world_id = resolvedCurrentWorldId,
+            dataCenter = cleanDataCenter,
+            data_center = cleanDataCenter,
+            contentId = contact.ContentId,
+            content_id = contact.ContentId,
+        };
+    }
+
+
+    private uint ResolveWorldIdForCloudLookup(string worldName)
+    {
+        if (string.IsNullOrWhiteSpace(worldName))
+            return 0u;
+
+        try
+        {
+            var cleanWorldName = worldName.Trim();
+            foreach (var world in dataManager.GetExcelSheet<World>())
+            {
+                if (string.Equals(world.Name.ToString(), cleanWorldName, StringComparison.OrdinalIgnoreCase))
+                    return world.RowId;
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "Privacy: failed to resolve world id for cloud lookup world {World}.", worldName);
+        }
+
+        return 0u;
+    }
+
+    private static string BuildResolveCandidateKey(object candidate)
+        => JsonSerializer.Serialize(candidate, JsonOptions);
 
     public CloudCharacterIdentity GetLocalCharacterIdentity()
     {
@@ -813,9 +929,30 @@ internal sealed class PrivacyCloudService : IDisposable
 
         return contacts.FirstOrDefault(c =>
             string.Equals(CleanName(c.Name), CleanName(profile.CharacterName), StringComparison.OrdinalIgnoreCase) &&
-            (c.WorldId != 0 && profile.HomeWorldId != 0
-                ? c.WorldId == profile.HomeWorldId
-                : string.Equals(c.World, profile.HomeWorld, StringComparison.OrdinalIgnoreCase)));
+            MatchesAnyKnownWorld(c, profile));
+    }
+
+    private static bool MatchesAnyKnownWorld(PrivateContact contact, CloudProfileSnapshot profile)
+    {
+        if (profile.HomeWorldId != 0)
+        {
+            if (contact.WorldId != 0 && contact.WorldId == profile.HomeWorldId)
+                return true;
+
+            if (contact.CurrentWorldId != 0 && contact.CurrentWorldId == profile.HomeWorldId)
+                return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(profile.HomeWorld))
+        {
+            if (string.Equals(contact.World, profile.HomeWorld, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (string.Equals(contact.CurrentWorld, profile.HomeWorld, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return profile.HomeWorldId == 0 && string.IsNullOrWhiteSpace(profile.HomeWorld);
     }
 
     private object? FindOwnLocalProfile(CloudCharacterIdentity identity)
@@ -1817,6 +1954,17 @@ internal sealed class PrivacyCloudService : IDisposable
         public CloudPresenceDto? Presence { get; set; }
         public string? PluginVersion { get; set; }
         public bool OutdatedPluginVersion { get; set; }
+        [JsonPropertyName("user_id")] public string? UserIdSnake { set => UserId = value; }
+        [JsonPropertyName("profile_id")] public string? ProfileIdSnake { set => UserId = value; }
+        [JsonPropertyName("character_name")] public string? CharacterNameSnake { set => CharacterName = value; }
+        [JsonPropertyName("name")] public string? NameAlias { set => CharacterName = value; }
+        [JsonPropertyName("home_world_name")] public string? HomeWorldNameSnake { set => HomeWorldName = value; }
+        [JsonPropertyName("home_world")] public string? HomeWorldAlias { set => HomeWorldName = value; }
+        [JsonPropertyName("world")] public string? WorldAlias { set => HomeWorldName = value; }
+        [JsonPropertyName("world_name")] public string? WorldNameAlias { set => HomeWorldName = value; }
+        [JsonPropertyName("home_world_id")] public uint HomeWorldIdSnake { set => HomeWorldId = value; }
+        [JsonPropertyName("world_id")] public uint WorldIdAlias { set => HomeWorldId = value; }
+        [JsonPropertyName("content_id")] public string? ContentIdSnake { set => ContentId = value; }
         [JsonPropertyName("plugin_version")] public string? PluginVersionSnake { set => PluginVersion = value; }
         [JsonPropertyName("outdated_plugin_version")] public bool OutdatedPluginVersionSnake { set => OutdatedPluginVersion = value; }
     }
